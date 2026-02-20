@@ -11,9 +11,9 @@ namespace
 {
     struct IdxTriplet
     {
-        int v = 0;   
-        int vt = 0;  
-        int vn = 0; 
+        int v = 0;
+        int vt = 0;
+        int vn = 0;
         bool operator==(const IdxTriplet& o) const { return v == o.v && vt == o.vt && vn == o.vn; }
     };
 
@@ -21,7 +21,7 @@ namespace
     {
         size_t operator()(const IdxTriplet& t) const noexcept
         {
-            
+
             size_t h1 = (size_t)t.v * 73856093u;
             size_t h2 = (size_t)t.vt * 19349663u;
             size_t h3 = (size_t)t.vn * 83492791u;
@@ -37,7 +37,7 @@ namespace
         return s.substr(b, e - b + 1);
     }
 
-    
+
     static void ParseFaceToken(const std::string& tok, int& v, int& vt, int& vn)
     {
         v = vt = vn = 0;
@@ -61,18 +61,18 @@ namespace
             return;
         }
 
-        std::string sVT = tok.substr(p1 + 1, p2 - (p1 + 1)); 
+        std::string sVT = tok.substr(p1 + 1, p2 - (p1 + 1));
         std::string sVN = tok.substr(p2 + 1);
 
         if (!sVT.empty()) vt = std::stoi(sVT);
         if (!sVN.empty()) vn = std::stoi(sVN);
     }
 
-  
+
     static int FixObjIndex(int idx, int size1Based)
     {
         if (idx > 0) return idx;
-        if (idx < 0) return size1Based + idx; 
+        if (idx < 0) return size1Based + idx;
         return 0;
     }
 }
@@ -84,20 +84,20 @@ bool ObjLoader::LoadObjPosNormalTex(const std::wstring& filename, ObjMeshData& o
     out.Submeshes.clear();
     out.MtlLibFile.clear();
 
-    
+
     std::string path(filename.begin(), filename.end());
     std::ifstream fin(path);
     if (!fin.is_open())
         return false;
 
-    
+
     std::vector<XMFLOAT3> positions(1);
     std::vector<XMFLOAT3> normals(1);
     std::vector<XMFLOAT2> texcoords(1);
 
     std::unordered_map<IdxTriplet, uint32_t, IdxHash> uniqueMap;
 
-    
+
     std::unordered_map<std::string, std::vector<uint32_t>> matToIndices;
     std::vector<std::string> matOrder;
 
@@ -189,7 +189,7 @@ bool ObjLoader::LoadObjPosNormalTex(const std::wstring& filename, ObjMeshData& o
         {
             float u, v;
             ss >> u >> v;
-           
+
             texcoords.push_back(XMFLOAT2(u, 1.0f - v));
         }
         else if (tag == "f")
@@ -199,7 +199,7 @@ bool ObjLoader::LoadObjPosNormalTex(const std::wstring& filename, ObjMeshData& o
             while (ss >> t) toks.push_back(t);
             if (toks.size() < 3) continue;
 
-            
+
             uint32_t i0 = getIndex(toks[0]);
             for (size_t i = 1; i + 1 < toks.size(); ++i)
             {
@@ -214,7 +214,7 @@ bool ObjLoader::LoadObjPosNormalTex(const std::wstring& filename, ObjMeshData& o
         }
     }
 
-    
+
     out.Indices.clear();
     out.Submeshes.clear();
 

@@ -24,6 +24,13 @@ static std::string TrimA(const std::string& s)
 }
 
 
+
+
+static std::string ToLowerA(std::string s)
+{
+    for (char& c : s) c = (char)tolower((unsigned char)c);
+    return s;
+}
 static std::wstring WidenAscii(const std::string& s)
 {
     std::wstring w;
@@ -50,7 +57,7 @@ std::unordered_map<std::string, std::string> CubeRenderer::ParseMtlDiffuseMaps(c
 {
     std::unordered_map<std::string, std::string> out;
 
-   
+
     std::string path(mtlPath.begin(), mtlPath.end());
     std::ifstream fin(path);
     if (!fin.is_open())
@@ -67,15 +74,15 @@ std::unordered_map<std::string, std::string> CubeRenderer::ParseMtlDiffuseMaps(c
         std::string tag;
         ss >> tag;
 
-        if (tag == "newmtl")
+        if (ToLowerA(tag) == "newmtl")
         {
             std::string name;
             std::getline(ss, name);
-            current = TrimA(name);
+            current = ToLowerA(TrimA(name));
         }
-        else if (tag == "map_Kd" && !current.empty())
+        else if (ToLowerA(tag) == "map_kd" && !current.empty())
         {
-           
+
             std::string rest;
             std::getline(ss, rest);
             rest = TrimA(rest);
@@ -94,26 +101,26 @@ std::unordered_map<std::string, std::string> CubeRenderer::ParseMtlDiffuseMaps(c
 
 void CubeRenderer::BuildResources()
 {
-   
+
     BuildMeshGeometry();
 
-  
+
     BuildConstantBuffer();
 
-   
+
     std::wstring exeDir = GetExeDir();
     std::wstring modelsDir = exeDir + L"Models\\";
-    std::wstring objName = L"BreadLoad-exported.obj"; 
+    std::wstring objName = L"Capsule.obj";
     std::wstring objPath = modelsDir + objName;
 
     ObjMeshData tmp;
- 
+
     ObjLoader::LoadObjPosNormalTex(objPath, tmp, false);
 
-    std::wstring mtlPath = modelsDir + WidenAscii(tmp.MtlLibFile.empty() ? "BreadLoad-exported.mtl" : tmp.MtlLibFile);
+    std::wstring mtlPath = modelsDir + WidenAscii(tmp.MtlLibFile.empty() ? "Capsule.mtl" : tmp.MtlLibFile);
     auto matToTex = ParseMtlDiffuseMaps(mtlPath);
 
-  
+
     std::vector<std::wstring> texturePaths;
     std::unordered_map<std::string, UINT> texIndexByFile;
 
@@ -129,15 +136,15 @@ void CubeRenderer::BuildResources()
             return idx;
         };
 
-   
-    const std::string breadFallback = "BreadLoad-exported01.jpg";
+
+    const std::string breadFallback = "check.png"; // fallback texture
 
     mSubmeshSrvIndex.clear();
     mSubmeshSrvIndex.reserve(mDrawSubmeshes.size());
 
     for (const auto& sm : mDrawSubmeshes)
     {
-        auto it = matToTex.find(sm.MaterialName);
+        auto it = matToTex.find(ToLowerA(sm.MaterialName));
         if (it != matToTex.end())
         {
             UINT idx = addTexture(it->second);
@@ -152,18 +159,18 @@ void CubeRenderer::BuildResources()
 
     if (texturePaths.empty())
     {
-     
+
         addTexture(breadFallback);
     }
 
-   
-  
+
+
     mAnimatedSrvIndex = addTexture("check.png");
 
-    
+
     BuildSrvDescriptorHeap((UINT)texturePaths.size());
 
-  
+
     mTextures.clear();
     mTextureUploads.clear();
     mTextures.resize(texturePaths.size());
@@ -175,7 +182,7 @@ void CubeRenderer::BuildResources()
         CreateTextureSrv(i, mTextures[i].Get());
     }
 
-   
+
     BuildRootSignature();
     BuildPSO();
 }
@@ -185,7 +192,7 @@ void CubeRenderer::BuildMeshGeometry()
     ObjMeshData mesh;
 
     std::wstring exeDir = GetExeDir();
-    std::wstring objPath = exeDir + L"Models\\BreadLoad-exported.obj";
+    std::wstring objPath = exeDir + L"Models\\Capsule.obj";
 
     if (!ObjLoader::LoadObjPosNormalTex(objPath, mesh, false))
     {
@@ -551,7 +558,7 @@ void CubeRenderer::Update(float totalTime, float deltaTime, const InputDevice& i
 {
     mTotalTime = totalTime;
 
-    
+
     bool k1 = input.IsKeyDown('1');
     bool k2 = input.IsKeyDown('2');
     if (k1 && !mPrevKey1) mMode = DemoMode::Bread;
@@ -587,7 +594,7 @@ void CubeRenderer::Update(float totalTime, float deltaTime, const InputDevice& i
     mConstants.SpecularColor = XMFLOAT4(1, 1, 1, 1);
     mConstants.Shininess = 16.0f;
 
-   
+
     if (mMode == DemoMode::Animated)
     {
         mConstants.Tiling = XMFLOAT2(1.0f, 1.0f);
@@ -620,7 +627,7 @@ void CubeRenderer::Draw(ID3D12GraphicsCommandList* cmdList)
 
     CD3DX12_GPU_DESCRIPTOR_HANDLE hGpu(mSrvHeap->GetGPUDescriptorHandleForHeapStart());
 
-   
+
     for (size_t i = 0; i < mDrawSubmeshes.size(); ++i)
     {
         UINT srvIdx = 0;

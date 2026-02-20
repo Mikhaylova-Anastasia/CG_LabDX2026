@@ -42,7 +42,7 @@ public:
     ID3D12PipelineState* GetPSO() const { return mPSO.Get(); }
 
 private:
-    void BuildMeshGeometry();   
+    void BuildMeshGeometry();
     void BuildConstantBuffer();
     void BuildRootSignature();
 
@@ -52,7 +52,7 @@ private:
         Microsoft::WRL::ComPtr<ID3D12Resource>& upload);
     void CreateTextureSrv(UINT srvIndex, ID3D12Resource* tex);
 
-    
+
     std::unordered_map<std::string, std::string> ParseMtlDiffuseMaps(const std::wstring& mtlPath);
 
     void UpdateCamera(const InputDevice& input, float dt);
@@ -96,18 +96,18 @@ private:
     float mCubeYaw = 0.0f;
     float mCubePitch = 0.0f;
 
-    
+
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> mSrvHeap;
     std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> mTextures;
     std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> mTextureUploads;
 
-   
+
     std::vector<ObjSubmesh> mDrawSubmeshes;
     std::vector<UINT>       mSubmeshSrvIndex;
 
     UINT mAnimatedSrvIndex = 0;
 
-    
+
     bool mPrevKey1 = false;
     bool mPrevKey2 = false;
 
