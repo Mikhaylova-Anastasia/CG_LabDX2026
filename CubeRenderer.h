@@ -2,21 +2,27 @@
 #pragma once
 #include "Common.h"
 #include "InputDevice.h"
+#include "ObjLoader.h"
+#include <unordered_map>
 
 struct ObjectConstants
 {
-    XMFLOAT4X4 WorldViewProj;
-    XMFLOAT4X4 World;
+    DirectX::XMFLOAT4X4 WorldViewProj;
+    DirectX::XMFLOAT4X4 World;
 
-    XMFLOAT3   EyePosW;
+    DirectX::XMFLOAT3   EyePosW;
     float      pad0;
 
-    XMFLOAT4   LightDir;
-    XMFLOAT4   DiffuseColor;
+    DirectX::XMFLOAT4   LightDir;
+    DirectX::XMFLOAT4   DiffuseColor;
 
-    XMFLOAT4   SpecularColor;
+    DirectX::XMFLOAT4   SpecularColor;
     float      Shininess;
-    XMFLOAT3   pad1;
+    float      pad1;
+    DirectX::XMFLOAT2   pad2;
+
+    DirectX::XMFLOAT2   Tiling;
+    DirectX::XMFLOAT2   UVOffset;
 };
 
 class CubeRenderer
@@ -36,12 +42,25 @@ public:
     ID3D12PipelineState* GetPSO() const { return mPSO.Get(); }
 
 private:
-    void BuildCubeGeometry();     
+    void BuildMeshGeometry();   
     void BuildConstantBuffer();
     void BuildRootSignature();
 
+    void BuildSrvDescriptorHeap(UINT numDescriptors);
+    void LoadTexture_WIC(const std::wstring& filePath,
+        Microsoft::WRL::ComPtr<ID3D12Resource>& tex,
+        Microsoft::WRL::ComPtr<ID3D12Resource>& upload);
+    void CreateTextureSrv(UINT srvIndex, ID3D12Resource* tex);
+
+    
+    std::unordered_map<std::string, std::string> ParseMtlDiffuseMaps(const std::wstring& mtlPath);
+
     void UpdateCamera(const InputDevice& input, float dt);
     void UpdateCubeRotation(const InputDevice& input, float dt);
+
+private:
+    enum class DemoMode { Bread = 0, Animated = 1 };
+    DemoMode mMode = DemoMode::Bread;
 
 private:
     ID3D12Device* mDevice;
@@ -49,15 +68,14 @@ private:
 
     UINT mCbvSrvUavDescriptorSize;
 
-    ComPtr<ID3D12Resource> mVertexBuffer;
-    ComPtr<ID3D12Resource> mIndexBuffer;
+    Microsoft::WRL::ComPtr<ID3D12Resource> mVertexBuffer;
+    Microsoft::WRL::ComPtr<ID3D12Resource> mIndexBuffer;
 
-    
-    ComPtr<ID3D12Resource> mVBUpload;
-    ComPtr<ID3D12Resource> mIBUpload;
+    Microsoft::WRL::ComPtr<ID3D12Resource> mVBUpload;
+    Microsoft::WRL::ComPtr<ID3D12Resource> mIBUpload;
 
-    ComPtr<ID3D12Resource> mConstantBuffer;
-    ComPtr<ID3D12Resource> mConstantUploadBuffer;
+    Microsoft::WRL::ComPtr<ID3D12Resource> mConstantBuffer;
+    Microsoft::WRL::ComPtr<ID3D12Resource> mConstantUploadBuffer;
 
     D3D12_VERTEX_BUFFER_VIEW mVBV = {};
     D3D12_INDEX_BUFFER_VIEW  mIBV = {};
@@ -66,17 +84,32 @@ private:
 
     ObjectConstants mConstants;
 
-    ComPtr<ID3D12RootSignature> mRootSignature;
-    ComPtr<ID3D12PipelineState> mPSO;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> mRootSignature;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> mPSO;
 
-    XMFLOAT4X4 mProj;
+    DirectX::XMFLOAT4X4 mProj;
 
-    // Camera
-    XMFLOAT3 mCameraPos = { 0.0f, 2.0f, -5.0f };
+    DirectX::XMFLOAT3 mCameraPos = { 0.0f, 2.0f, -5.0f };
     float mYaw = 0.0f;
     float mPitch = 0.0f;
 
-    // Object rotation
     float mCubeYaw = 0.0f;
     float mCubePitch = 0.0f;
+
+    
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> mSrvHeap;
+    std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> mTextures;
+    std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> mTextureUploads;
+
+   
+    std::vector<ObjSubmesh> mDrawSubmeshes;
+    std::vector<UINT>       mSubmeshSrvIndex;
+
+    UINT mAnimatedSrvIndex = 0;
+
+    
+    bool mPrevKey1 = false;
+    bool mPrevKey2 = false;
+
+    float mTotalTime = 0.0f;
 };

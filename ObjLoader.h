@@ -3,22 +3,36 @@
 #include "Common.h"
 #include <string>
 
-struct VertexPosNormal
+
+struct VertexPosNormalTex
 {
-    XMFLOAT3 Pos;
-    XMFLOAT3 Normal;
+    DirectX::XMFLOAT3 Pos;
+    DirectX::XMFLOAT3 Normal;
+    DirectX::XMFLOAT2 TexC;
+};
+
+
+struct ObjSubmesh
+{
+    std::string MaterialName;     
+    uint32_t    StartIndex = 0;    
+    uint32_t    IndexCount = 0;   
 };
 
 struct ObjMeshData
 {
-    std::vector<VertexPosNormal> Vertices;
-    std::vector<uint32_t> Indices;
+    std::vector<VertexPosNormalTex> Vertices;
+    std::vector<uint32_t>           Indices;
+
+   
+    std::string                     MtlLibFile;   
+    std::vector<ObjSubmesh>         Submeshes;     
 };
 
 class ObjLoader
 {
 public:
    
-    static bool LoadObjPosNormal(const std::wstring& filename, ObjMeshData& out, bool convertToLH = true);
+   
+    static bool LoadObjPosNormalTex(const std::wstring& filename, ObjMeshData& out, bool convertToLH = true);
 };
-
