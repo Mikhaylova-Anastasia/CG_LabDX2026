@@ -137,7 +137,7 @@ void CubeRenderer::BuildResources()
         };
 
 
-    const std::string breadFallback = "check.png"; // fallback texture
+    const std::string Fallback = "check.png"; 
 
     mSubmeshSrvIndex.clear();
     mSubmeshSrvIndex.reserve(mDrawSubmeshes.size());
@@ -152,7 +152,7 @@ void CubeRenderer::BuildResources()
         }
         else
         {
-            UINT idx = addTexture(breadFallback);
+            UINT idx = addTexture(Fallback);
             mSubmeshSrvIndex.push_back(idx);
         }
     }
@@ -160,7 +160,7 @@ void CubeRenderer::BuildResources()
     if (texturePaths.empty())
     {
 
-        addTexture(breadFallback);
+        addTexture(Fallback);
     }
 
 
@@ -558,10 +558,9 @@ void CubeRenderer::Update(float totalTime, float deltaTime, const InputDevice& i
 {
     mTotalTime = totalTime;
 
-
     bool k1 = input.IsKeyDown('1');
     bool k2 = input.IsKeyDown('2');
-    if (k1 && !mPrevKey1) mMode = DemoMode::Bread;
+    if (k1 && !mPrevKey1) mMode = DemoMode::Capsule;
     if (k2 && !mPrevKey2) mMode = DemoMode::Animated;
     mPrevKey1 = k1;
     mPrevKey2 = k2;
@@ -594,17 +593,32 @@ void CubeRenderer::Update(float totalTime, float deltaTime, const InputDevice& i
     mConstants.SpecularColor = XMFLOAT4(1, 1, 1, 1);
     mConstants.Shininess = 16.0f;
 
+    float camDist = sqrtf(
+        mCameraPos.x * mCameraPos.x +
+        mCameraPos.y * mCameraPos.y +
+        mCameraPos.z * mCameraPos.z
+    );
+
+    const float nearDist = 2.0f;
+    const float farDist = 20.0f;
+    const float minScale = 1.0f;
+    const float maxScale = 6.0f;
+
+    float t = (camDist - nearDist) / (farDist - nearDist);
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+
+    float scale = minScale + (maxScale - minScale) * t;
+    mConstants.Tiling = XMFLOAT2(scale, scale);
 
     if (mMode == DemoMode::Animated)
     {
-        mConstants.Tiling = XMFLOAT2(1.0f, 1.0f);
         float ox = fmodf(totalTime * 0.20f, 1.0f);
         float oy = fmodf(totalTime * 0.10f, 1.0f);
         mConstants.UVOffset = XMFLOAT2(ox, oy);
     }
     else
     {
-        mConstants.Tiling = XMFLOAT2(1.0f, 1.0f);
         mConstants.UVOffset = XMFLOAT2(0.0f, 0.0f);
     }
 
