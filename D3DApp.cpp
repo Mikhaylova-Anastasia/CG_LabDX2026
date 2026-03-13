@@ -18,7 +18,8 @@ D3DApp::D3DApp(HINSTANCE hInstance)
 
 D3DApp::~D3DApp()
 {
-    FlushCommandQueue();
+    if (mDevice && mCommandQueue && mFence)
+        FlushCommandQueue();
 }
 
 bool D3DApp::Initialize()
@@ -182,16 +183,21 @@ void D3DApp::CreateRtvAndDsvDescriptorHeaps()
 
 void D3DApp::CreateDepthStencilBuffer()
 {
+    if (!mDevice || mClientWidth == 0 || mClientHeight == 0)
+        return;
+
     DXGI_FORMAT depthFormat = DXGI_FORMAT_D24_UNORM_S8_UINT;
 
     D3D12_RESOURCE_DESC depthDesc = {};
     depthDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    depthDesc.Alignment = 0;
     depthDesc.Width = mClientWidth;
     depthDesc.Height = mClientHeight;
     depthDesc.DepthOrArraySize = 1;
     depthDesc.MipLevels = 1;
     depthDesc.Format = depthFormat;
     depthDesc.SampleDesc.Count = 1;
+    depthDesc.SampleDesc.Quality = 0;
     depthDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
     depthDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
 
@@ -216,6 +222,8 @@ void D3DApp::CreateDepthStencilBuffer()
         mDsvHeap->GetCPUDescriptorHandleForHeapStart());
 }
 
+
+
 void D3DApp::FlushCommandQueue()
 {
     mCurrentFence++;
@@ -232,7 +240,7 @@ void D3DApp::FlushCommandQueue()
 
 void D3DApp::CalculateFrameStats()
 {
-    
+
     mFrameCount++;
 
     float totalTime = mTimer.TotalTime();
@@ -271,7 +279,7 @@ int D3DApp::Run()
             mTimer.Tick();
             mInput.BeginFrame();
 
-            CalculateFrameStats(); 
+            CalculateFrameStats();
 
             Update(mTimer);
             Draw(mTimer);
@@ -302,8 +310,56 @@ D3D12_CPU_DESCRIPTOR_HANDLE D3DApp::DepthStencilView() const
 
 void D3DApp::OnResize()
 {
-    
+    if (!mDevice || !mSwapChain)
+        return;
+
+    if (mClientWidth == 0 || mClientHeight == 0)
+        return;
+
+    FlushCommandQueue();
+
+    for (int i = 0; i < SwapChainBufferCount; ++i)
+        mSwapChainBuffer[i].Reset();
+
+    mDepthStencilBuffer.Reset();
+
+    ThrowIfFailed(mSwapChain->ResizeBuffers(
+        SwapChainBufferCount,
+        mClientWidth,
+        mClientHeight,
+        DXGI_FORMAT_R8G8B8A8_UNORM,
+        DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH));
+
+    mCurrBackBuffer = 0;
+
+    CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle(
+        mRtvHeap->GetCPUDescriptorHandleForHeapStart());
+
+    for (UINT i = 0; i < SwapChainBufferCount; ++i)
+    {
+        ThrowIfFailed(mSwapChain->GetBuffer(i, IID_PPV_ARGS(&mSwapChainBuffer[i])));
+        mDevice->CreateRenderTargetView(
+            mSwapChainBuffer[i].Get(),
+            nullptr,
+            rtvHandle);
+
+        rtvHandle.Offset(1, mRtvDescriptorSize);
+    }
+
+    CreateDepthStencilBuffer();
+
+    mScreenViewport.TopLeftX = 0;
+    mScreenViewport.TopLeftY = 0;
+    mScreenViewport.Width = static_cast<float>(mClientWidth);
+    mScreenViewport.Height = static_cast<float>(mClientHeight);
+    mScreenViewport.MinDepth = 0.0f;
+    mScreenViewport.MaxDepth = 1.0f;
+
+    mScissorRect = { 0, 0, (LONG)mClientWidth, (LONG)mClientHeight };
 }
+
+
+
 
 LRESULT D3DApp::MsgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
@@ -314,7 +370,8 @@ LRESULT D3DApp::MsgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_SIZE:
         mClientWidth = LOWORD(lParam);
         mClientHeight = HIWORD(lParam);
-        OnResize();
+        if (wParam != SIZE_MINIMIZED)
+            OnResize();
         return 0;
 
     case WM_DESTROY:
@@ -329,3 +386,5 @@ LRESULT D3DApp::MsgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }
+
+
