@@ -2,6 +2,7 @@
 #include <fstream>
 #include <sstream>
 #include <algorithm>
+#include <cfloat>
 
 using namespace DirectX;
 using Microsoft::WRL::ComPtr;
@@ -341,6 +342,9 @@ void RenderingSystem::BuildMeshGeometry()
     }
 
     mIndexCount = (UINT)mesh.Indices.size();
+
+    mCpuVertices = mesh.Vertices;
+    mCpuIndices = mesh.Indices;
 
     const UINT vBufferSize = (UINT)(mesh.Vertices.size() * sizeof(VertexPosNormalTex));
     const UINT iBufferSize = (UINT)(mesh.Indices.size() * sizeof(uint32_t));
@@ -870,6 +874,159 @@ void RenderingSystem::CreateTextureSrv(UINT srvIndex, ID3D12Resource* tex)
     mDevice->CreateShaderResourceView(tex, &srvDesc, hCpu);
 }
 
+
+XMMATRIX RenderingSystem::GetSceneWorldMatrix() const
+{
+    return
+        XMMatrixScaling(0.1f, 0.1f, 0.1f) *
+        XMMatrixRotationX(mObjectPitch) *
+        XMMatrixRotationY(mObjectYaw) *
+        XMMatrixTranslation(0.0f, -1.0f, 0.0f);
+}
+
+bool RenderingSystem::RayIntersectsTriangle(
+    FXMVECTOR rayOrigin,
+    FXMVECTOR rayDir,
+    FXMVECTOR v0,
+    FXMVECTOR v1,
+    FXMVECTOR v2,
+    float& outT) const
+{
+    const float eps = 1e-6f;
+
+    XMVECTOR e1 = v1 - v0;
+    XMVECTOR e2 = v2 - v0;
+    XMVECTOR p = XMVector3Cross(rayDir, e2);
+    float det = XMVectorGetX(XMVector3Dot(e1, p));
+
+    if (fabs(det) < eps)
+        return false;
+
+    float invDet = 1.0f / det;
+    XMVECTOR tvec = rayOrigin - v0;
+
+    float u = XMVectorGetX(XMVector3Dot(tvec, p)) * invDet;
+    if (u < 0.0f || u > 1.0f)
+        return false;
+
+    XMVECTOR q = XMVector3Cross(tvec, e1);
+    float v = XMVectorGetX(XMVector3Dot(rayDir, q)) * invDet;
+    if (v < 0.0f || (u + v) > 1.0f)
+        return false;
+
+    float t = XMVectorGetX(XMVector3Dot(e2, q)) * invDet;
+    if (t < eps)
+        return false;
+
+    outT = t;
+    return true;
+}
+
+bool RenderingSystem::RaycastScene(
+    const XMFLOAT3& rayOrigin,
+    const XMFLOAT3& rayDir,
+    XMFLOAT3& outHitPos) const
+{
+    if (mCpuVertices.empty() || mCpuIndices.empty())
+        return false;
+
+    XMMATRIX world = GetSceneWorldMatrix();
+
+    XMVECTOR ro = XMLoadFloat3(&rayOrigin);
+    XMVECTOR rd = XMVector3Normalize(XMLoadFloat3(&rayDir));
+
+    float bestT = FLT_MAX;
+    bool hit = false;
+
+    for (size_t i = 0; i + 2 < mCpuIndices.size(); i += 3)
+    {
+        const VertexPosNormalTex& a = mCpuVertices[mCpuIndices[i + 0]];
+        const VertexPosNormalTex& b = mCpuVertices[mCpuIndices[i + 1]];
+        const VertexPosNormalTex& c = mCpuVertices[mCpuIndices[i + 2]];
+
+        XMVECTOR v0 = XMVector3TransformCoord(XMLoadFloat3(&a.Pos), world);
+        XMVECTOR v1 = XMVector3TransformCoord(XMLoadFloat3(&b.Pos), world);
+        XMVECTOR v2 = XMVector3TransformCoord(XMLoadFloat3(&c.Pos), world);
+
+        float t = 0.0f;
+        if (RayIntersectsTriangle(ro, rd, v0, v1, v2, t) && t < bestT)
+        {
+            bestT = t;
+            hit = true;
+        }
+    }
+
+    if (!hit)
+        return false;
+
+    XMVECTOR hitPos = ro + rd * bestT;
+    XMStoreFloat3(&outHitPos, hitPos);
+    return true;
+}
+
+void RenderingSystem::TryShootLight(const InputDevice& input)
+{
+    if (!input.WasKeyPressed(VK_SPACE))
+        return;
+
+    XMFLOAT3 rayDir;
+    rayDir.x = cosf(mPitch) * sinf(mYaw);
+    rayDir.y = sinf(mPitch);
+    rayDir.z = cosf(mPitch) * cosf(mYaw);
+
+    XMFLOAT3 hitPos;
+    if (!RaycastScene(mCameraPos, rayDir, hitPos))
+        return;
+
+    const int slot = mNextShotLight;
+    mNextShotLight = (mNextShotLight + 1) % MaxShotLights;
+
+    ShotLight& s = mShotLights[slot];
+    s.Active = true;
+    s.Flying = true;
+    s.Position = mCameraPos;
+    s.Target = hitPos;
+    s.Color = XMFLOAT3(1.0f, 0.75f, 0.2f);
+    s.Range = 12.0f;
+    s.Intensity = 2.5f;
+
+    XMVECTOR p0 = XMLoadFloat3(&s.Position);
+    XMVECTOR p1 = XMLoadFloat3(&s.Target);
+    XMVECTOR dir = XMVector3Normalize(p1 - p0);
+    XMVECTOR vel = dir * 12.0f;
+    XMStoreFloat3(&s.Velocity, vel);
+}
+
+void RenderingSystem::UpdateShotLights(float deltaTime)
+{
+    for (int i = 0; i < MaxShotLights; ++i)
+    {
+        ShotLight& s = mShotLights[i];
+        if (!s.Active || !s.Flying)
+            continue;
+
+        XMVECTOR pos = XMLoadFloat3(&s.Position);
+        XMVECTOR target = XMLoadFloat3(&s.Target);
+        XMVECTOR vel = XMLoadFloat3(&s.Velocity);
+
+        XMVECTOR toTarget = target - pos;
+        float distLeft = XMVectorGetX(XMVector3Length(toTarget));
+        float step = XMVectorGetX(XMVector3Length(vel)) * deltaTime;
+
+        if (step >= distLeft)
+        {
+            s.Position = s.Target;
+            s.Flying = false;
+        }
+        else
+        {
+            pos += vel * deltaTime;
+            XMStoreFloat3(&s.Position, pos);
+        }
+    }
+}
+
+
 void RenderingSystem::UpdateCamera(const InputDevice& input, float dt)
 {
     const float moveSpeed = 6.0f;
@@ -921,11 +1078,7 @@ void RenderingSystem::UpdateObjectRotation(const InputDevice& input)
 
 void RenderingSystem::UpdateGeometryCB(float /*totalTime*/)
 {
-    XMMATRIX world =
-        XMMatrixScaling(0.1f, 0.1f, 0.1f) *
-        XMMatrixRotationX(mObjectPitch) *
-        XMMatrixRotationY(mObjectYaw) *
-        XMMatrixTranslation(0.0f, -1.0f, 0.0f);
+    XMMATRIX world = GetSceneWorldMatrix();
 
     XMVECTOR pos = XMLoadFloat3(&mCameraPos);
     XMVECTOR forward = XMVectorSet(
@@ -953,37 +1106,49 @@ void RenderingSystem::UpdateGeometryCB(float /*totalTime*/)
 void RenderingSystem::UpdateLightCB(float totalTime)
 {
     mLightingData.EyePosW = mCameraPos;
-    mLightingData.AmbientColor = XMFLOAT3(0.05f, 0.05f, 0.05f);
+    mLightingData.AmbientColor = XMFLOAT3(0.18f, 0.18f, 0.20f);
 
-    mLightingData.DirLight.Direction = XMFLOAT3(0.3f, -1.0f, -0.2f);
-    mLightingData.DirLight.Intensity = 0.35f;
+    mLightingData.DirLight.Direction = XMFLOAT3(0.5f, -1.0f, -0.3f);
+    mLightingData.DirLight.Intensity = 1.0f;
     mLightingData.DirLight.Color = XMFLOAT3(1.0f, 1.0f, 1.0f);
 
-    // Красный point light
-    mLightingData.PointLights[0].Position = XMFLOAT3(
-        35.0f * cosf(totalTime),
-        12.0f,
-        35.0f * sinf(totalTime));
-    mLightingData.PointLights[0].Range = 80.0f;
-    mLightingData.PointLights[0].Color = XMFLOAT3(1.0f, 0.15f, 0.15f);
-    mLightingData.PointLights[0].Intensity = 8.0f;
+    mLightingData.PointLights[0].Position = XMFLOAT3(8.0f * cosf(totalTime), 4.0f, 8.0f * sinf(totalTime));
+    mLightingData.PointLights[0].Range = 20.0f;
+    mLightingData.PointLights[0].Color = XMFLOAT3(1.0f, 0.2f, 0.2f);
+    mLightingData.PointLights[0].Intensity = 2.0f;
 
-    // Синий point light
-    mLightingData.PointLights[1].Position = XMFLOAT3(
-        35.0f * cosf(-0.7f * totalTime + 1.5f),
-        18.0f,
-        35.0f * sinf(-0.7f * totalTime + 1.5f));
-    mLightingData.PointLights[1].Range = 80.0f;
-    mLightingData.PointLights[1].Color = XMFLOAT3(0.2f, 0.45f, 1.0f);
-    mLightingData.PointLights[1].Intensity = 8.0f;
+    mLightingData.PointLights[1].Position = XMFLOAT3(8.0f * cosf(-0.6f * totalTime), 6.0f, 8.0f * sinf(-0.6f * totalTime));
+    mLightingData.PointLights[1].Range = 20.0f;
+    mLightingData.PointLights[1].Color = XMFLOAT3(0.2f, 0.4f, 1.0f);
+    mLightingData.PointLights[1].Intensity = 2.0f;
 
-    // Spot light сверху
-    mLightingData.SpotLight.Position = XMFLOAT3(0.0f, 35.0f, -10.0f);
-    mLightingData.SpotLight.Direction = XMFLOAT3(0.0f, -1.0f, 0.2f);
-    mLightingData.SpotLight.Range = 120.0f;
-    mLightingData.SpotLight.SpotPower = 20.0f;
+    for (int i = 0; i < MaxShotLights; ++i)
+    {
+        const int dst = OriginalPointLightCount + i;
+        mLightingData.PointLights[dst].Position = XMFLOAT3(0.0f, -1000.0f, 0.0f);
+        mLightingData.PointLights[dst].Range = 1.0f;
+        mLightingData.PointLights[dst].Color = XMFLOAT3(0.0f, 0.0f, 0.0f);
+        mLightingData.PointLights[dst].Intensity = 0.0f;
+    }
+
+    for (int i = 0; i < MaxShotLights; ++i)
+    {
+        if (!mShotLights[i].Active)
+            continue;
+
+        const int dst = OriginalPointLightCount + i;
+        mLightingData.PointLights[dst].Position = mShotLights[i].Position;
+        mLightingData.PointLights[dst].Range = mShotLights[i].Range;
+        mLightingData.PointLights[dst].Color = mShotLights[i].Color;
+        mLightingData.PointLights[dst].Intensity = mShotLights[i].Intensity;
+    }
+
+    mLightingData.SpotLight.Position = XMFLOAT3(0.0f, 10.0f, -5.0f);
+    mLightingData.SpotLight.Direction = XMFLOAT3(0.0f, -1.0f, 0.3f);
+    mLightingData.SpotLight.Range = 30.0f;
+    mLightingData.SpotLight.SpotPower = 24.0f;
     mLightingData.SpotLight.Color = XMFLOAT3(0.9f, 1.0f, 0.7f);
-    mLightingData.SpotLight.Intensity = 6.0f;
+    mLightingData.SpotLight.Intensity = 2.0f;
 
     void* mapped = nullptr;
     ThrowIfFailed(mLightingCB->Map(0, nullptr, &mapped));
@@ -995,6 +1160,8 @@ void RenderingSystem::Update(float totalTime, float deltaTime, const InputDevice
 {
     UpdateObjectRotation(input);
     UpdateCamera(input, deltaTime);
+    TryShootLight(input);
+    UpdateShotLights(deltaTime);
     UpdateGeometryCB(totalTime);
     UpdateLightCB(totalTime);
 }

@@ -39,7 +39,7 @@ cbuffer LightCB : register(b0)
     float pad0;
 
     DirectionalLight gDirLight;
-    PointLight gPointLights[2];
+    PointLight gPointLights[8];
     SpotLight gSpotLight;
 
     float3 gAmbientColor;
@@ -114,8 +114,13 @@ float4 PSMain(PSIn pin) : SV_Target
 
     float3 color = albedo * gAmbientColor;
     color += ApplyDirectional(albedo, normal);
-    color += ApplyPoint(albedo, normal, posW, gPointLights[0]);
-    color += ApplyPoint(albedo, normal, posW, gPointLights[1]);
+
+    [unroll]
+    for (int i = 0; i < 8; ++i)
+    {
+        color += ApplyPoint(albedo, normal, posW, gPointLights[i]);
+    }
+
     color += ApplySpot(albedo, normal, posW, gSpotLight);
 
     return float4(color, 1.0f);

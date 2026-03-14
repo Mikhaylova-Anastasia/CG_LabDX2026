@@ -49,7 +49,7 @@ struct LightConstants
     float pad0 = 0.0f;
 
     DirectionalLightGPU DirLight;
-    PointLightGPU PointLights[2];
+    PointLightGPU PointLights[8];
     SpotLightGPU SpotLight;
 
     DirectX::XMFLOAT3 AmbientColor;
@@ -76,6 +76,24 @@ public:
         D3D12_CPU_DESCRIPTOR_HANDLE backBufferRtv,
         D3D12_CPU_DESCRIPTOR_HANDLE depthDsv);
 
+
+    static const int OriginalPointLightCount = 2;
+    static const int MaxShotLights = 6;
+
+    struct ShotLight
+    {
+        bool Active = false;
+        bool Flying = false;
+
+        DirectX::XMFLOAT3 Position = { 0.0f, 0.0f, 0.0f };
+        DirectX::XMFLOAT3 Target = { 0.0f, 0.0f, 0.0f };
+        DirectX::XMFLOAT3 Velocity = { 0.0f, 0.0f, 0.0f };
+
+        DirectX::XMFLOAT3 Color = { 1.0f, 0.75f, 0.2f };
+        float Range = 12.0f;
+        float Intensity = 2.5f;
+    };
+
 private:
     void BuildMeshGeometry();
     void BuildTextureResources();
@@ -96,6 +114,24 @@ private:
     void UpdateObjectRotation(const InputDevice& input);
     void UpdateGeometryCB(float totalTime);
     void UpdateLightCB(float totalTime);
+
+    DirectX::XMMATRIX GetSceneWorldMatrix() const;
+
+    bool RayIntersectsTriangle(
+        DirectX::FXMVECTOR rayOrigin,
+        DirectX::FXMVECTOR rayDir,
+        DirectX::FXMVECTOR v0,
+        DirectX::FXMVECTOR v1,
+        DirectX::FXMVECTOR v2,
+        float& outT) const;
+
+    bool RaycastScene(
+        const DirectX::XMFLOAT3& rayOrigin,
+        const DirectX::XMFLOAT3& rayDir,
+        DirectX::XMFLOAT3& outHitPos) const;
+
+    void TryShootLight(const InputDevice& input);
+    void UpdateShotLights(float deltaTime);
 
     void DrawGeometryPass(ID3D12GraphicsCommandList* cmdList, D3D12_CPU_DESCRIPTOR_HANDLE depthDsv);
     void DrawLightingPass(ID3D12GraphicsCommandList* cmdList, D3D12_CPU_DESCRIPTOR_HANDLE backBufferRtv);
@@ -138,6 +174,10 @@ private:
     UINT mModelTextureCount = 0;
     UINT mGBufferSrvStartIndex = 0;
 
+
+    std::vector<VertexPosNormalTex> mCpuVertices;
+    std::vector<uint32_t> mCpuIndices;
+
     ComPtr<ID3D12Resource> mGeometryCB;
     ComPtr<ID3D12Resource> mLightingCB;
 
@@ -148,6 +188,10 @@ private:
     DirectX::XMFLOAT3 mCameraPos = { 0.0f, 1.5f, -2.0f };
     float mYaw = 0.0f;
     float mPitch = 0.0f;
+
+
+    ShotLight mShotLights[MaxShotLights]{};
+    int mNextShotLight = 0;
 
     float mObjectYaw = 0.0f;
     float mObjectPitch = 0.0f;
