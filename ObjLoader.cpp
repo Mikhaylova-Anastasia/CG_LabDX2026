@@ -1,35 +1,15 @@
-// ObjLoader.cpp
 #include "ObjLoader.h"
 #include <fstream>
 #include <sstream>
 #include <unordered_map>
-#include <vector>
+#include <algorithm>
+#include <cctype>
 
 using namespace DirectX;
 
 namespace
 {
-    struct IdxTriplet
-    {
-        int v = 0;
-        int vt = 0;
-        int vn = 0;
-        bool operator==(const IdxTriplet& o) const { return v == o.v && vt == o.vt && vn == o.vn; }
-    };
-
-    struct IdxHash
-    {
-        size_t operator()(const IdxTriplet& t) const noexcept
-        {
-
-            size_t h1 = (size_t)t.v * 73856093u;
-            size_t h2 = (size_t)t.vt * 19349663u;
-            size_t h3 = (size_t)t.vn * 83492791u;
-            return h1 ^ h2 ^ h3;
-        }
-    };
-
-    static std::string Trim(const std::string& s)
+    static std::string TrimA(const std::string& s)
     {
         size_t b = s.find_first_not_of(" \t\r\n");
         if (b == std::string::npos) return "";
@@ -37,43 +17,206 @@ namespace
         return s.substr(b, e - b + 1);
     }
 
+    static std::string ToLowerA(std::string s)
+    {
+        std::transform(s.begin(), s.end(), s.begin(),
+            [](unsigned char c) { return (char)std::tolower(c); });
+        return s;
+    }
 
-    static void ParseFaceToken(const std::string& tok, int& v, int& vt, int& vn)
+    static std::wstring GetDirPart(const std::wstring& path)
+    {
+        size_t p = path.find_last_of(L"\\/");
+        if (p == std::wstring::npos) return L"";
+        return path.substr(0, p + 1);
+    }
+
+    static std::wstring WidenAscii(const std::string& s)
+    {
+        std::wstring out;
+        out.reserve(s.size());
+        for (char c : s)
+            out.push_back((wchar_t)(unsigned char)c);
+        return out;
+    }
+
+    static int FixIndex(int idx, int count)
+    {
+        if (idx > 0) return idx - 1;
+        if (idx < 0) return count + idx;
+        return -1;
+    }
+
+    struct VertexKey
+    {
+        int v = 0;
+        int vt = 0;
+        int vn = 0;
+
+        bool operator==(const VertexKey& other) const
+        {
+            return v == other.v && vt == other.vt && vn == other.vn;
+        }
+    };
+
+    struct VertexKeyHash
+    {
+        size_t operator()(const VertexKey& k) const noexcept
+        {
+            size_t h1 = std::hash<int>{}(k.v);
+            size_t h2 = std::hash<int>{}(k.vt);
+            size_t h3 = std::hash<int>{}(k.vn);
+            return h1 ^ (h2 << 1) ^ (h3 << 2);
+        }
+    };
+
+    static bool ParseFaceVertex(const std::string& token, int& v, int& vt, int& vn)
     {
         v = vt = vn = 0;
 
-        size_t p1 = tok.find('/');
-        if (p1 == std::string::npos)
+        size_t s1 = token.find('/');
+        if (s1 == std::string::npos)
         {
-            v = std::stoi(tok);
-            return;
+            v = std::stoi(token);
+            return true;
         }
 
-        size_t p2 = tok.find('/', p1 + 1);
+        size_t s2 = token.find('/', s1 + 1);
 
-        std::string sV = tok.substr(0, p1);
-        if (!sV.empty()) v = std::stoi(sV);
+        std::string a = token.substr(0, s1);
+        std::string b;
+        std::string c;
 
-        if (p2 == std::string::npos)
+        if (s2 == std::string::npos)
         {
-            std::string sVT = tok.substr(p1 + 1);
-            if (!sVT.empty()) vt = std::stoi(sVT);
-            return;
+            b = token.substr(s1 + 1);
+        }
+        else
+        {
+            b = token.substr(s1 + 1, s2 - s1 - 1);
+            c = token.substr(s2 + 1);
         }
 
-        std::string sVT = tok.substr(p1 + 1, p2 - (p1 + 1));
-        std::string sVN = tok.substr(p2 + 1);
-
-        if (!sVT.empty()) vt = std::stoi(sVT);
-        if (!sVN.empty()) vn = std::stoi(sVN);
+        if (!a.empty()) v = std::stoi(a);
+        if (!b.empty()) vt = std::stoi(b);
+        if (!c.empty()) vn = std::stoi(c);
+        return true;
     }
 
-
-    static int FixObjIndex(int idx, int size1Based)
+    static void ParseMtlFile(const std::wstring& mtlPath, std::unordered_map<std::string, ObjMaterialInfo>& outMaterials)
     {
-        if (idx > 0) return idx;
-        if (idx < 0) return size1Based + idx;
-        return 0;
+        std::ifstream fin(mtlPath);
+        if (!fin.is_open())
+            return;
+
+        std::string line;
+        std::string current;
+
+        auto readLastToken = [](std::stringstream& ss) -> std::string
+            {
+                std::string tok;
+                std::string last;
+                while (ss >> tok)
+                    last = tok;
+                return last;
+            };
+
+        while (std::getline(fin, line))
+        {
+            line = TrimA(line);
+            if (line.empty() || line[0] == '#')
+                continue;
+
+            std::stringstream ss(line);
+            std::string tag;
+            ss >> tag;
+            tag = ToLowerA(tag);
+
+            if (tag == "newmtl")
+            {
+                std::string name;
+                std::getline(ss, name);
+                current = ToLowerA(TrimA(name));
+                outMaterials[current] = ObjMaterialInfo{};
+            }
+            else if (!current.empty())
+            {
+                std::string file = readLastToken(ss);
+                if (file.empty())
+                    continue;
+
+                if (tag == "map_kd")
+                    outMaterials[current].DiffuseMap = file;
+                else if (tag == "map_bump" || tag == "bump" || tag == "norm")
+                    outMaterials[current].NormalMap = file;
+                else if (tag == "disp" || tag == "map_disp")
+                    outMaterials[current].DisplacementMap = file;
+            }
+        }
+    }
+
+    static void ComputeTangents(ObjMeshData& mesh)
+    {
+        for (auto& v : mesh.Vertices)
+        {
+            v.Tangent = XMFLOAT3(0.0f, 0.0f, 0.0f);
+            v.Bitangent = XMFLOAT3(0.0f, 0.0f, 0.0f);
+        }
+
+        for (size_t i = 0; i + 2 < mesh.Indices.size(); i += 3)
+        {
+            auto& v0 = mesh.Vertices[mesh.Indices[i + 0]];
+            auto& v1 = mesh.Vertices[mesh.Indices[i + 1]];
+            auto& v2 = mesh.Vertices[mesh.Indices[i + 2]];
+
+            XMVECTOR p0 = XMLoadFloat3(&v0.Pos);
+            XMVECTOR p1 = XMLoadFloat3(&v1.Pos);
+            XMVECTOR p2 = XMLoadFloat3(&v2.Pos);
+
+            XMVECTOR e1 = p1 - p0;
+            XMVECTOR e2 = p2 - p0;
+
+            float du1 = v1.TexC.x - v0.TexC.x;
+            float dv1 = v1.TexC.y - v0.TexC.y;
+            float du2 = v2.TexC.x - v0.TexC.x;
+            float dv2 = v2.TexC.y - v0.TexC.y;
+
+            float det = du1 * dv2 - dv1 * du2;
+            if (fabsf(det) < 1e-8f)
+                continue;
+
+            float invDet = 1.0f / det;
+            XMVECTOR tangent = (e1 * dv2 - e2 * dv1) * invDet;
+            XMVECTOR bitangent = (e2 * du1 - e1 * du2) * invDet;
+
+            XMFLOAT3 t, b;
+            XMStoreFloat3(&t, tangent);
+            XMStoreFloat3(&b, bitangent);
+
+            auto add = [](XMFLOAT3& a, const XMFLOAT3& b)
+                {
+                    a.x += b.x; a.y += b.y; a.z += b.z;
+                };
+
+            add(v0.Tangent, t); add(v1.Tangent, t); add(v2.Tangent, t);
+            add(v0.Bitangent, b); add(v1.Bitangent, b); add(v2.Bitangent, b);
+        }
+
+        for (auto& v : mesh.Vertices)
+        {
+            XMVECTOR n = XMVector3Normalize(XMLoadFloat3(&v.Normal));
+            XMVECTOR t = XMLoadFloat3(&v.Tangent);
+            XMVECTOR b = XMLoadFloat3(&v.Bitangent);
+
+            t = XMVector3Normalize(t - n * XMVectorGetX(XMVector3Dot(n, t)));
+            b = XMVector3Normalize(b - n * XMVectorGetX(XMVector3Dot(n, b)));
+
+            XMFLOAT3 tn, bn;
+            XMStoreFloat3(&tn, t);
+            XMStoreFloat3(&bn, b);
+            v.Tangent = tn;
+            v.Bitangent = bn;
+        }
     }
 }
 
@@ -82,161 +225,156 @@ bool ObjLoader::LoadObjPosNormalTex(const std::wstring& filename, ObjMeshData& o
     out.Vertices.clear();
     out.Indices.clear();
     out.Submeshes.clear();
+    out.Materials.clear();
     out.MtlLibFile.clear();
 
-
-    std::string path(filename.begin(), filename.end());
-    std::ifstream fin(path);
+    std::ifstream fin(filename);
     if (!fin.is_open())
         return false;
 
-
-    std::vector<XMFLOAT3> positions(1);
-    std::vector<XMFLOAT3> normals(1);
-    std::vector<XMFLOAT2> texcoords(1);
-
-    std::unordered_map<IdxTriplet, uint32_t, IdxHash> uniqueMap;
-
-
-    std::unordered_map<std::string, std::vector<uint32_t>> matToIndices;
-    std::vector<std::string> matOrder;
-
-    std::string currentMat = "__default__";
-    matToIndices[currentMat] = {};
-    matOrder.push_back(currentMat);
-
-    auto ensureMat = [&](const std::string& m)
-        {
-            if (matToIndices.find(m) == matToIndices.end())
-            {
-                matToIndices[m] = {};
-                matOrder.push_back(m);
-            }
-            currentMat = m;
-        };
-
-    auto getIndex = [&](const std::string& tok) -> uint32_t
-        {
-            int v = 0, vt = 0, vn = 0;
-            ParseFaceToken(tok, v, vt, vn);
-
-            v = FixObjIndex(v, (int)positions.size());
-            vt = FixObjIndex(vt, (int)texcoords.size());
-            vn = FixObjIndex(vn, (int)normals.size());
-
-            IdxTriplet key{ v, vt, vn };
-            auto it = uniqueMap.find(key);
-            if (it != uniqueMap.end())
-                return it->second;
-
-            VertexPosNormalTex vert{};
-
-            if (v > 0 && v < (int)positions.size())
-                vert.Pos = positions[v];
-            else
-                vert.Pos = XMFLOAT3(0, 0, 0);
-
-            if (vn > 0 && vn < (int)normals.size())
-                vert.Normal = normals[vn];
-            else
-                vert.Normal = XMFLOAT3(0, 1, 0);
-
-            if (vt > 0 && vt < (int)texcoords.size())
-                vert.TexC = texcoords[vt];
-            else
-                vert.TexC = XMFLOAT2(0, 0);
-
-            uint32_t newIndex = (uint32_t)out.Vertices.size();
-            out.Vertices.push_back(vert);
-            uniqueMap[key] = newIndex;
-            return newIndex;
-        };
+    std::vector<XMFLOAT3> positions;
+    std::vector<XMFLOAT3> normals;
+    std::vector<XMFLOAT2> texcoords;
+    std::unordered_map<VertexKey, uint32_t, VertexKeyHash> uniqueVerts;
 
     std::string line;
+    std::string currentMaterial = "__default__";
+
+    ObjSubmesh currentSubmesh;
+    currentSubmesh.MaterialName = currentMaterial;
+    currentSubmesh.StartIndex = 0;
+    currentSubmesh.IndexCount = 0;
+
+    auto flushSubmesh = [&]()
+        {
+            if (currentSubmesh.IndexCount > 0)
+            {
+                out.Submeshes.push_back(currentSubmesh);
+                currentSubmesh.StartIndex = (uint32_t)out.Indices.size();
+                currentSubmesh.IndexCount = 0;
+            }
+        };
+
     while (std::getline(fin, line))
     {
-        if (line.empty() || line[0] == '#') continue;
+        line = TrimA(line);
+        if (line.empty() || line[0] == '#')
+            continue;
 
-        std::stringstream ss(line);
-        std::string tag;
-        ss >> tag;
+        std::istringstream iss(line);
+        std::string key;
+        iss >> key;
 
-        if (tag == "mtllib")
+        if (key == "mtllib")
         {
-            std::string mtl;
-            std::getline(ss, mtl);
-            out.MtlLibFile = Trim(mtl);
+            std::string rest;
+            std::getline(iss, rest);
+            rest = TrimA(rest);
+            if (!rest.empty() && rest.front() == '"' && rest.back() == '"' && rest.size() >= 2)
+                rest = rest.substr(1, rest.size() - 2);
+            out.MtlLibFile = rest;
         }
-        else if (tag == "usemtl")
+        else if (key == "usemtl")
         {
-            std::string m;
-            std::getline(ss, m);
-            ensureMat(Trim(m));
+            std::string rest;
+            std::getline(iss, rest);
+            rest = TrimA(rest);
+            if (rest.empty()) rest = "__default__";
+
+            flushSubmesh();
+            currentMaterial = rest;
+            currentSubmesh.MaterialName = currentMaterial;
         }
-        else if (tag == "v")
+        else if (key == "v")
         {
             float x, y, z;
-            ss >> x >> y >> z;
-            positions.push_back(XMFLOAT3(x, y, z));
+            iss >> x >> y >> z;
+            positions.emplace_back(x, y, z);
         }
-        else if (tag == "vn")
+        else if (key == "vt")
+        {
+            float u = 0.0f, v = 0.0f;
+            iss >> u >> v;
+            texcoords.emplace_back(u, 1.0f - v);
+        }
+        else if (key == "vn")
         {
             float x, y, z;
-            ss >> x >> y >> z;
-            normals.push_back(XMFLOAT3(x, y, z));
+            iss >> x >> y >> z;
+            normals.emplace_back(x, y, z);
         }
-        else if (tag == "vt")
+        else if (key == "f")
         {
-            float u, v;
-            ss >> u >> v;
+            std::vector<std::string> faceTokens;
+            std::string tok;
+            while (iss >> tok)
+                faceTokens.push_back(tok);
 
-            texcoords.push_back(XMFLOAT2(u, 1.0f - v));
-        }
-        else if (tag == "f")
-        {
-            std::vector<std::string> toks;
-            std::string t;
-            while (ss >> t) toks.push_back(t);
-            if (toks.size() < 3) continue;
+            if (faceTokens.size() < 3)
+                continue;
 
+            std::vector<uint32_t> faceIndices;
+            faceIndices.reserve(faceTokens.size());
 
-            uint32_t i0 = getIndex(toks[0]);
-            for (size_t i = 1; i + 1 < toks.size(); ++i)
+            for (const std::string& ft : faceTokens)
             {
-                uint32_t i1 = getIndex(toks[i]);
-                uint32_t i2 = getIndex(toks[i + 1]);
+                int iv = 0, ivt = 0, ivn = 0;
+                if (!ParseFaceVertex(ft, iv, ivt, ivn))
+                    continue;
 
-                auto& inds = matToIndices[currentMat];
-                inds.push_back(i0);
-                inds.push_back(i1);
-                inds.push_back(i2);
+                int posIndex = FixIndex(iv, (int)positions.size());
+                int texIndex = FixIndex(ivt, (int)texcoords.size());
+                int nrmIndex = FixIndex(ivn, (int)normals.size());
+
+                VertexKey keyv{ posIndex, texIndex, nrmIndex };
+                auto it = uniqueVerts.find(keyv);
+                if (it != uniqueVerts.end())
+                {
+                    faceIndices.push_back(it->second);
+                }
+                else
+                {
+                    VertexPosNormalTangentTex vert{};
+                    vert.Pos = (posIndex >= 0 && posIndex < (int)positions.size()) ? positions[posIndex] : XMFLOAT3(0, 0, 0);
+                    vert.Normal = (nrmIndex >= 0 && nrmIndex < (int)normals.size()) ? normals[nrmIndex] : XMFLOAT3(0, 1, 0);
+                    vert.TexC = (texIndex >= 0 && texIndex < (int)texcoords.size()) ? texcoords[texIndex] : XMFLOAT2(0, 0);
+                    vert.Tangent = XMFLOAT3(0, 0, 0);
+                    vert.Bitangent = XMFLOAT3(0, 0, 0);
+
+                    uint32_t newIndex = (uint32_t)out.Vertices.size();
+                    out.Vertices.push_back(vert);
+                    uniqueVerts[keyv] = newIndex;
+                    faceIndices.push_back(newIndex);
+                }
+            }
+
+            for (size_t i = 1; i + 1 < faceIndices.size(); ++i)
+            {
+                out.Indices.push_back(faceIndices[0]);
+                out.Indices.push_back(faceIndices[i]);
+                out.Indices.push_back(faceIndices[i + 1]);
+                currentSubmesh.IndexCount += 3;
             }
         }
     }
 
+    flushSubmesh();
 
-    out.Indices.clear();
-    out.Submeshes.clear();
-
-    uint32_t cursor = 0;
-    for (const auto& matName : matOrder)
+    if (out.Submeshes.empty())
     {
-        auto it = matToIndices.find(matName);
-        if (it == matToIndices.end()) continue;
-
-        const auto& inds = it->second;
-        if (inds.empty()) continue;
-
         ObjSubmesh sm;
-        sm.MaterialName = matName;
-        sm.StartIndex = cursor;
-        sm.IndexCount = (uint32_t)inds.size();
-
-        out.Indices.insert(out.Indices.end(), inds.begin(), inds.end());
-
-        cursor += sm.IndexCount;
+        sm.MaterialName = "__default__";
+        sm.StartIndex = 0;
+        sm.IndexCount = (uint32_t)out.Indices.size();
         out.Submeshes.push_back(sm);
     }
 
+    if (!out.MtlLibFile.empty())
+    {
+        std::wstring mtlPath = GetDirPart(filename) + WidenAscii(out.MtlLibFile);
+        ParseMtlFile(mtlPath, out.Materials);
+    }
+
+    ComputeTangents(out);
     return !out.Vertices.empty() && !out.Indices.empty();
 }

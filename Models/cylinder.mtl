@@ -1,0 +1,5 @@
+newmtl ground_mat
+
+map_Kd Apocalyptic_Ground_ALB.png
+map_Bump Apocalyptic_Ground_NORM.png
+disp ApocalypticGround_DISP.png

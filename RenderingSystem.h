@@ -7,10 +7,17 @@
 
 struct GeometryConstants
 {
-    DirectX::XMFLOAT4X4 WorldViewProj;
     DirectX::XMFLOAT4X4 World;
+    DirectX::XMFLOAT4X4 ViewProj;
     DirectX::XMFLOAT2   Tiling;
     DirectX::XMFLOAT2   UVOffset;
+    DirectX::XMFLOAT3   EyePosW;
+    float               TessMin = 1.0f;
+    float               TessMax = 8.0f;
+    float               TessMaxDistance = 8.0f;
+    float               DisplacementScale = 0.05f;
+    float               NormalMapFlipY = 0.0f;
+    DirectX::XMFLOAT3   pad0{};
 };
 
 struct DirectionalLightGPU
@@ -49,11 +56,44 @@ struct LightConstants
     float pad0 = 0.0f;
 
     DirectionalLightGPU DirLight;
-    PointLightGPU PointLights[8];
+    PointLightGPU PointLights[2];
     SpotLightGPU SpotLight;
 
     DirectX::XMFLOAT3 AmbientColor;
     float pad1 = 0.0f;
+};
+
+enum class RenderMode
+{
+    Sponza = 0,
+    Tessellation = 1
+};
+
+struct SceneMesh
+{
+    std::wstring ObjPath;
+    std::wstring AssetDir;
+
+    ObjMeshData CpuMesh;
+    std::vector<ObjSubmesh> DrawSubmeshes;
+    std::vector<UINT> SubmeshBaseSrv;
+
+    ComPtr<ID3D12Resource> VertexBuffer;
+    ComPtr<ID3D12Resource> IndexBuffer;
+    ComPtr<ID3D12Resource> VBUpload;
+    ComPtr<ID3D12Resource> IBUpload;
+
+    D3D12_VERTEX_BUFFER_VIEW VBV = {};
+    D3D12_INDEX_BUFFER_VIEW  IBV = {};
+
+    DirectX::XMFLOAT4X4 World{};
+
+    bool UseTessellation = false;
+    float TessMin = 1.0f;
+    float TessMax = 8.0f;
+    float TessMaxDistance = 8.0f;
+    float DisplacementScale = 0.05f;
+    float NormalMapFlipY = 0.0f;
 };
 
 class RenderingSystem
@@ -76,27 +116,9 @@ public:
         D3D12_CPU_DESCRIPTOR_HANDLE backBufferRtv,
         D3D12_CPU_DESCRIPTOR_HANDLE depthDsv);
 
-
-    static const int OriginalPointLightCount = 2;
-    static const int MaxShotLights = 6;
-
-    struct ShotLight
-    {
-        bool Active = false;
-        bool Flying = false;
-
-        DirectX::XMFLOAT3 Position = { 0.0f, 0.0f, 0.0f };
-        DirectX::XMFLOAT3 Target = { 0.0f, 0.0f, 0.0f };
-        DirectX::XMFLOAT3 Velocity = { 0.0f, 0.0f, 0.0f };
-
-        DirectX::XMFLOAT3 Color = { 1.0f, 0.75f, 0.2f };
-        float Range = 12.0f;
-        float Intensity = 2.5f;
-    };
-
 private:
-    void BuildMeshGeometry();
-    void BuildTextureResources();
+    void BuildSceneGeometry();
+    void BuildSceneTextures();
     void BuildDescriptorHeaps();
     void BuildConstantBuffers();
     void BuildRootSignatures();
@@ -106,34 +128,22 @@ private:
         ComPtr<ID3D12Resource>& tex,
         ComPtr<ID3D12Resource>& upload);
 
-    void CreateTextureSrv(UINT srvIndex, ID3D12Resource* tex);
+    void CreateSolidTextureRGBA(UINT rgba,
+        ComPtr<ID3D12Resource>& tex,
+        ComPtr<ID3D12Resource>& upload);
 
-    std::unordered_map<std::string, std::string> ParseMtlDiffuseMaps(const std::wstring& mtlPath);
+    void CreateTextureSrv(UINT srvIndex, ID3D12Resource* tex);
 
     void UpdateCamera(const InputDevice& input, float dt);
     void UpdateObjectRotation(const InputDevice& input);
-    void UpdateGeometryCB(float totalTime);
+    void UpdateGeometryCB(const SceneMesh& scene);
     void UpdateLightCB(float totalTime);
 
-    DirectX::XMMATRIX GetSceneWorldMatrix() const;
+    void DrawSceneGeometryPass(
+        ID3D12GraphicsCommandList* cmdList,
+        const SceneMesh& scene,
+        D3D12_CPU_DESCRIPTOR_HANDLE depthDsv);
 
-    bool RayIntersectsTriangle(
-        DirectX::FXMVECTOR rayOrigin,
-        DirectX::FXMVECTOR rayDir,
-        DirectX::FXMVECTOR v0,
-        DirectX::FXMVECTOR v1,
-        DirectX::FXMVECTOR v2,
-        float& outT) const;
-
-    bool RaycastScene(
-        const DirectX::XMFLOAT3& rayOrigin,
-        const DirectX::XMFLOAT3& rayDir,
-        DirectX::XMFLOAT3& outHitPos) const;
-
-    void TryShootLight(const InputDevice& input);
-    void UpdateShotLights(float deltaTime);
-
-    void DrawGeometryPass(ID3D12GraphicsCommandList* cmdList, D3D12_CPU_DESCRIPTOR_HANDLE depthDsv);
     void DrawLightingPass(ID3D12GraphicsCommandList* cmdList, D3D12_CPU_DESCRIPTOR_HANDLE backBufferRtv);
 
 private:
@@ -154,29 +164,18 @@ private:
     ComPtr<ID3D12RootSignature> mLightingRootSig;
 
     ComPtr<ID3D12PipelineState> mGeometryPSO;
+    ComPtr<ID3D12PipelineState> mTessPSO;
     ComPtr<ID3D12PipelineState> mLightingPSO;
 
-    ComPtr<ID3D12Resource> mVertexBuffer;
-    ComPtr<ID3D12Resource> mIndexBuffer;
-    ComPtr<ID3D12Resource> mVBUpload;
-    ComPtr<ID3D12Resource> mIBUpload;
-
-    D3D12_VERTEX_BUFFER_VIEW mVBV = {};
-    D3D12_INDEX_BUFFER_VIEW  mIBV = {};
-    UINT mIndexCount = 0;
-
-    std::vector<ObjSubmesh> mDrawSubmeshes;
-    std::vector<UINT> mSubmeshSrvIndex;
+    SceneMesh mSponzaScene;
+    SceneMesh mTessScene;
+    RenderMode mMode = RenderMode::Sponza;
 
     std::vector<ComPtr<ID3D12Resource>> mTextures;
     std::vector<ComPtr<ID3D12Resource>> mTextureUploads;
 
     UINT mModelTextureCount = 0;
     UINT mGBufferSrvStartIndex = 0;
-
-
-    std::vector<VertexPosNormalTex> mCpuVertices;
-    std::vector<uint32_t> mCpuIndices;
 
     ComPtr<ID3D12Resource> mGeometryCB;
     ComPtr<ID3D12Resource> mLightingCB;
@@ -188,10 +187,6 @@ private:
     DirectX::XMFLOAT3 mCameraPos = { 0.0f, 1.5f, -2.0f };
     float mYaw = 0.0f;
     float mPitch = 0.0f;
-
-
-    ShotLight mShotLights[MaxShotLights]{};
-    int mNextShotLight = 0;
 
     float mObjectYaw = 0.0f;
     float mObjectPitch = 0.0f;

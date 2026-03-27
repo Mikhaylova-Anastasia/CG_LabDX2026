@@ -2,7 +2,6 @@
 #include <fstream>
 #include <sstream>
 #include <algorithm>
-#include <cfloat>
 
 using namespace DirectX;
 using Microsoft::WRL::ComPtr;
@@ -21,50 +20,22 @@ static std::wstring GetExeDir_RS()
     return std::wstring(exePath);
 }
 
-static std::string TrimA_RS(const std::string& s)
-{
-    size_t b = s.find_first_not_of(" \t\r\n");
-    if (b == std::string::npos) return "";
-    size_t e = s.find_last_not_of(" \t\r\n");
-    return s.substr(b, e - b + 1);
-}
-
-static std::string ToLowerA_RS(std::string s)
-{
-    for (size_t i = 0; i < s.size(); ++i)
-        s[i] = (char)tolower((unsigned char)s[i]);
-    return s;
-}
-
-static std::wstring WidenAscii_RS(const std::string& s)
-{
-    std::wstring w;
-    w.reserve(s.size());
-    for (size_t i = 0; i < s.size(); ++i)
-        w.push_back((wchar_t)(unsigned char)s[i]);
-    return w;
-}
-
-static bool EndsWithNoCase_RS(const std::wstring& s, const std::wstring& suffix)
-{
-    if (s.size() < suffix.size())
-        return false;
-
-    std::wstring a = s.substr(s.size() - suffix.size());
-    std::wstring b = suffix;
-
-    std::transform(a.begin(), a.end(), a.begin(), towlower);
-    std::transform(b.begin(), b.end(), b.begin(), towlower);
-
-    return a == b;
-}
-
 static std::wstring GetDirPart_RS(const std::wstring& path)
 {
     size_t p = path.find_last_of(L"\\/");
     if (p == std::wstring::npos)
         return L"";
     return path.substr(0, p + 1);
+}
+
+static bool EndsWithNoCase_RS(const std::wstring& s, const std::wstring& suffix)
+{
+    if (s.size() < suffix.size()) return false;
+    std::wstring a = s.substr(s.size() - suffix.size());
+    std::wstring b = suffix;
+    std::transform(a.begin(), a.end(), a.begin(), towlower);
+    std::transform(b.begin(), b.end(), b.begin(), towlower);
+    return a == b;
 }
 
 static bool FileExists_RS(const std::wstring& path)
@@ -108,20 +79,8 @@ static void LoadTexture_TGA_Internal_RS(
     TGAHeader_RS hdr = {};
     fin.read(reinterpret_cast<char*>(&hdr), sizeof(hdr));
 
-    if (!fin)
-        throw std::runtime_error("Failed to read TGA header");
-
-    if (hdr.imageType != 2)
-    {
-        MessageBoxW(nullptr, filePath.c_str(), L"Unsupported TGA type", MB_OK | MB_ICONERROR);
-        throw std::runtime_error("Unsupported TGA type");
-    }
-
-    if (hdr.pixelDepth != 24 && hdr.pixelDepth != 32)
-    {
-        MessageBoxW(nullptr, filePath.c_str(), L"Unsupported TGA pixel depth", MB_OK | MB_ICONERROR);
-        throw std::runtime_error("Unsupported TGA bpp");
-    }
+    if (!fin || hdr.imageType != 2 || (hdr.pixelDepth != 24 && hdr.pixelDepth != 32))
+        throw std::runtime_error("Unsupported TGA");
 
     if (hdr.idLength > 0)
         fin.seekg(hdr.idLength, std::ios::cur);
@@ -134,18 +93,15 @@ static void LoadTexture_TGA_Internal_RS(
 
     std::vector<uint8_t> src(srcImageSize);
     fin.read(reinterpret_cast<char*>(src.data()), srcImageSize);
-
     if (!fin)
-        throw std::runtime_error("Failed to read TGA pixels");
+        throw std::runtime_error("Failed to read TGA");
 
     std::vector<uint8_t> rgba(width * height * 4);
-
     const bool topOrigin = (hdr.imageDescriptor & 0x20) != 0;
 
     for (UINT y = 0; y < height; ++y)
     {
         UINT srcY = topOrigin ? y : (height - 1 - y);
-
         const uint8_t* srcRow = src.data() + srcY * srcRowPitch;
         uint8_t* dstRow = rgba.data() + y * width * 4;
 
@@ -153,7 +109,6 @@ static void LoadTexture_TGA_Internal_RS(
         {
             const uint8_t* p = srcRow + x * srcBpp;
             uint8_t* d = dstRow + x * 4;
-
             d[0] = p[2];
             d[1] = p[1];
             d[2] = p[0];
@@ -165,7 +120,6 @@ static void LoadTexture_TGA_Internal_RS(
         DXGI_FORMAT_R8G8B8A8_UNORM, width, height, 1, 1);
 
     CD3DX12_HEAP_PROPERTIES defaultHeap(D3D12_HEAP_TYPE_DEFAULT);
-
     ThrowIfFailed(device->CreateCommittedResource(
         &defaultHeap,
         D3D12_HEAP_FLAG_NONE,
@@ -180,7 +134,6 @@ static void LoadTexture_TGA_Internal_RS(
 
     CD3DX12_HEAP_PROPERTIES uploadHeap(D3D12_HEAP_TYPE_UPLOAD);
     D3D12_RESOURCE_DESC uploadDesc = CD3DX12_RESOURCE_DESC::Buffer(uploadBufferSize);
-
     ThrowIfFailed(device->CreateCommittedResource(
         &uploadHeap,
         D3D12_HEAP_FLAG_NONE,
@@ -222,63 +175,10 @@ RenderingSystem::RenderingSystem(
     XMStoreFloat4x4(&mProj, P);
 }
 
-std::unordered_map<std::string, std::string> RenderingSystem::ParseMtlDiffuseMaps(const std::wstring& mtlPath)
-{
-    std::unordered_map<std::string, std::string> out;
-
-    std::string pathA(mtlPath.begin(), mtlPath.end());
-    std::ifstream fin(pathA.c_str(), std::ios::in);
-
-    if (!fin.is_open())
-    {
-        MessageBoxW(nullptr, mtlPath.c_str(), L"Cannot open MTL", MB_OK | MB_ICONERROR);
-        return out;
-    }
-
-    std::string line;
-    std::string current;
-
-    while (std::getline(fin, line))
-    {
-        line = TrimA_RS(line);
-        if (line.empty() || line[0] == '#')
-            continue;
-
-        std::stringstream ss(line);
-        std::string tag;
-        ss >> tag;
-        tag = ToLowerA_RS(tag);
-
-        if (tag == "newmtl")
-        {
-            std::string name;
-            std::getline(ss, name);
-            current = ToLowerA_RS(TrimA_RS(name));
-        }
-        else if (tag == "map_kd" && !current.empty())
-        {
-            std::string rest;
-            std::getline(ss, rest);
-            rest = TrimA_RS(rest);
-
-            std::stringstream ss2(rest);
-            std::string tok;
-            std::string lastTok;
-            while (ss2 >> tok)
-                lastTok = tok;
-
-            if (!lastTok.empty())
-                out[current] = lastTok;
-        }
-    }
-
-    return out;
-}
-
 void RenderingSystem::BuildResources()
 {
-    BuildMeshGeometry();
-    BuildTextureResources();
+    BuildSceneGeometry();
+    BuildSceneTextures();
 
     mGBuffer.Initialize(
         mDevice,
@@ -297,7 +197,6 @@ void RenderingSystem::OnResize(UINT width, UINT height)
 {
     mWidth = width;
     mHeight = height;
-
     if (width == 0 || height == 0)
         return;
 
@@ -318,222 +217,209 @@ void RenderingSystem::OnResize(UINT width, UINT height)
     mGBuffer.CreateDescriptors(mDevice, rtvStart, gbufSrvCpu, gbufSrvGpu);
 }
 
-void RenderingSystem::BuildMeshGeometry()
+void RenderingSystem::BuildSceneGeometry()
 {
-    ObjMeshData mesh;
-
     std::wstring exeDir = GetExeDir_RS();
-    std::wstring objPath = exeDir + L"Models\\sponza.obj";
 
-    if (!ObjLoader::LoadObjPosNormalTex(objPath, mesh, false))
+    mSponzaScene.ObjPath = exeDir + L"Models\\sponza.obj";
+    mSponzaScene.AssetDir = GetDirPart_RS(mSponzaScene.ObjPath);
+    mSponzaScene.UseTessellation = false;
+
+    XMStoreFloat4x4(&mSponzaScene.World,
+        XMMatrixScaling(0.1f, 0.1f, 0.1f) *
+        XMMatrixTranslation(0.0f, -1.0f, 0.0f));
+
+    if (!ObjLoader::LoadObjPosNormalTex(mSponzaScene.ObjPath, mSponzaScene.CpuMesh, false))
     {
-        MessageBoxW(nullptr, objPath.c_str(), L"OBJ NOT FOUND", MB_OK | MB_ICONERROR);
-        throw std::runtime_error("OBJ load failed");
+        MessageBoxW(nullptr, mSponzaScene.ObjPath.c_str(), L"SPONZA OBJ NOT FOUND", MB_OK | MB_ICONERROR);
+        throw std::runtime_error("Sponza load failed");
     }
+    mSponzaScene.DrawSubmeshes = mSponzaScene.CpuMesh.Submeshes;
 
-    mDrawSubmeshes = mesh.Submeshes;
-    if (mDrawSubmeshes.empty())
+    mTessScene.ObjPath = exeDir + L"Models\\cylinder.obj";
+    mTessScene.AssetDir = GetDirPart_RS(mTessScene.ObjPath);
+    mTessScene.UseTessellation = true;
+    mTessScene.TessMin = 1.0f;
+    mTessScene.TessMax = 6.0f;
+    mTessScene.TessMaxDistance = 10.0f;
+    mTessScene.DisplacementScale = 0.3f;   
+    mTessScene.NormalMapFlipY = 0.0f;
+
+    XMStoreFloat4x4(&mTessScene.World,
+        XMMatrixScaling(1.5f, 1.5f, 1.5f) *
+        XMMatrixTranslation(0.0f, 0.0f, 3.0f));
+
+    if (!ObjLoader::LoadObjPosNormalTex(mTessScene.ObjPath, mTessScene.CpuMesh, false))
     {
-        ObjSubmesh sm;
-        sm.MaterialName = "__default__";
-        sm.StartIndex = 0;
-        sm.IndexCount = (uint32_t)mesh.Indices.size();
-        mDrawSubmeshes.push_back(sm);
+        MessageBoxW(nullptr, mTessScene.ObjPath.c_str(), L"TESS OBJ NOT FOUND", MB_OK | MB_ICONERROR);
+        throw std::runtime_error("Tess mesh load failed");
     }
+    mTessScene.DrawSubmeshes = mTessScene.CpuMesh.Submeshes;
 
-    mIndexCount = (UINT)mesh.Indices.size();
+    auto buildGpuBuffers = [&](SceneMesh& scene)
+        {
+            const UINT vbSize = (UINT)(scene.CpuMesh.Vertices.size() * sizeof(VertexPosNormalTangentTex));
+            const UINT ibSize = (UINT)(scene.CpuMesh.Indices.size() * sizeof(uint32_t));
 
-    mCpuVertices = mesh.Vertices;
-    mCpuIndices = mesh.Indices;
+            CD3DX12_HEAP_PROPERTIES defaultHeap(D3D12_HEAP_TYPE_DEFAULT);
+            CD3DX12_HEAP_PROPERTIES uploadHeap(D3D12_HEAP_TYPE_UPLOAD);
+            D3D12_RESOURCE_DESC vbDesc = CD3DX12_RESOURCE_DESC::Buffer(vbSize);
+            D3D12_RESOURCE_DESC ibDesc = CD3DX12_RESOURCE_DESC::Buffer(ibSize);
 
-    const UINT vBufferSize = (UINT)(mesh.Vertices.size() * sizeof(VertexPosNormalTex));
-    const UINT iBufferSize = (UINT)(mesh.Indices.size() * sizeof(uint32_t));
+            ThrowIfFailed(mDevice->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE, &vbDesc,
+                D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&scene.VertexBuffer)));
+            ThrowIfFailed(mDevice->CreateCommittedResource(&uploadHeap, D3D12_HEAP_FLAG_NONE, &vbDesc,
+                D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&scene.VBUpload)));
 
-    CD3DX12_HEAP_PROPERTIES defaultHeapProps(D3D12_HEAP_TYPE_DEFAULT);
-    CD3DX12_HEAP_PROPERTIES uploadHeapProps(D3D12_HEAP_TYPE_UPLOAD);
+            void* mapped = nullptr;
+            ThrowIfFailed(scene.VBUpload->Map(0, nullptr, &mapped));
+            memcpy(mapped, scene.CpuMesh.Vertices.data(), vbSize);
+            scene.VBUpload->Unmap(0, nullptr);
 
-    D3D12_RESOURCE_DESC vbDesc = CD3DX12_RESOURCE_DESC::Buffer(vBufferSize);
-    D3D12_RESOURCE_DESC ibDesc = CD3DX12_RESOURCE_DESC::Buffer(iBufferSize);
+            mInitCmdList->CopyBufferRegion(scene.VertexBuffer.Get(), 0, scene.VBUpload.Get(), 0, vbSize);
+            auto vbBarrier = CD3DX12_RESOURCE_BARRIER::Transition(scene.VertexBuffer.Get(),
+                D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+            mInitCmdList->ResourceBarrier(1, &vbBarrier);
 
-    ThrowIfFailed(mDevice->CreateCommittedResource(
-        &defaultHeapProps,
-        D3D12_HEAP_FLAG_NONE,
-        &vbDesc,
-        D3D12_RESOURCE_STATE_COPY_DEST,
-        nullptr,
-        IID_PPV_ARGS(&mVertexBuffer)));
+            ThrowIfFailed(mDevice->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE, &ibDesc,
+                D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&scene.IndexBuffer)));
+            ThrowIfFailed(mDevice->CreateCommittedResource(&uploadHeap, D3D12_HEAP_FLAG_NONE, &ibDesc,
+                D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&scene.IBUpload)));
 
-    ThrowIfFailed(mDevice->CreateCommittedResource(
-        &uploadHeapProps,
-        D3D12_HEAP_FLAG_NONE,
-        &vbDesc,
-        D3D12_RESOURCE_STATE_GENERIC_READ,
-        nullptr,
-        IID_PPV_ARGS(&mVBUpload)));
+            ThrowIfFailed(scene.IBUpload->Map(0, nullptr, &mapped));
+            memcpy(mapped, scene.CpuMesh.Indices.data(), ibSize);
+            scene.IBUpload->Unmap(0, nullptr);
 
-    void* mapped = nullptr;
-    ThrowIfFailed(mVBUpload->Map(0, nullptr, &mapped));
-    memcpy(mapped, mesh.Vertices.data(), vBufferSize);
-    mVBUpload->Unmap(0, nullptr);
+            mInitCmdList->CopyBufferRegion(scene.IndexBuffer.Get(), 0, scene.IBUpload.Get(), 0, ibSize);
+            auto ibBarrier = CD3DX12_RESOURCE_BARRIER::Transition(scene.IndexBuffer.Get(),
+                D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_INDEX_BUFFER);
+            mInitCmdList->ResourceBarrier(1, &ibBarrier);
 
-    mInitCmdList->CopyBufferRegion(mVertexBuffer.Get(), 0, mVBUpload.Get(), 0, vBufferSize);
-    {
-        CD3DX12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(
-            mVertexBuffer.Get(),
-            D3D12_RESOURCE_STATE_COPY_DEST,
-            D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
-        mInitCmdList->ResourceBarrier(1, &barrier);
-    }
+            scene.VBV.BufferLocation = scene.VertexBuffer->GetGPUVirtualAddress();
+            scene.VBV.StrideInBytes = sizeof(VertexPosNormalTangentTex);
+            scene.VBV.SizeInBytes = vbSize;
 
-    ThrowIfFailed(mDevice->CreateCommittedResource(
-        &defaultHeapProps,
-        D3D12_HEAP_FLAG_NONE,
-        &ibDesc,
-        D3D12_RESOURCE_STATE_COPY_DEST,
-        nullptr,
-        IID_PPV_ARGS(&mIndexBuffer)));
+            scene.IBV.BufferLocation = scene.IndexBuffer->GetGPUVirtualAddress();
+            scene.IBV.Format = DXGI_FORMAT_R32_UINT;
+            scene.IBV.SizeInBytes = ibSize;
+        };
 
-    ThrowIfFailed(mDevice->CreateCommittedResource(
-        &uploadHeapProps,
-        D3D12_HEAP_FLAG_NONE,
-        &ibDesc,
-        D3D12_RESOURCE_STATE_GENERIC_READ,
-        nullptr,
-        IID_PPV_ARGS(&mIBUpload)));
-
-    ThrowIfFailed(mIBUpload->Map(0, nullptr, &mapped));
-    memcpy(mapped, mesh.Indices.data(), iBufferSize);
-    mIBUpload->Unmap(0, nullptr);
-
-    mInitCmdList->CopyBufferRegion(mIndexBuffer.Get(), 0, mIBUpload.Get(), 0, iBufferSize);
-    {
-        CD3DX12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(
-            mIndexBuffer.Get(),
-            D3D12_RESOURCE_STATE_COPY_DEST,
-            D3D12_RESOURCE_STATE_INDEX_BUFFER);
-        mInitCmdList->ResourceBarrier(1, &barrier);
-    }
-
-    mVBV.BufferLocation = mVertexBuffer->GetGPUVirtualAddress();
-    mVBV.StrideInBytes = sizeof(VertexPosNormalTex);
-    mVBV.SizeInBytes = vBufferSize;
-
-    mIBV.BufferLocation = mIndexBuffer->GetGPUVirtualAddress();
-    mIBV.Format = DXGI_FORMAT_R32_UINT;
-    mIBV.SizeInBytes = iBufferSize;
+    buildGpuBuffers(mSponzaScene);
+    buildGpuBuffers(mTessScene);
 }
 
-void RenderingSystem::BuildTextureResources()
+void RenderingSystem::BuildSceneTextures()
 {
-    std::wstring exeDir = GetExeDir_RS();
-    std::wstring modelsDir = exeDir + L"Models\\";
-    std::wstring objPath = modelsDir + L"sponza.obj";
+    mTextures.clear();
+    mTextureUploads.clear();
 
-    ObjMeshData tmp;
-    if (!ObjLoader::LoadObjPosNormalTex(objPath, tmp, false))
-    {
-        MessageBoxW(nullptr, objPath.c_str(), L"OBJ NOT FOUND FOR TEXTURES", MB_OK | MB_ICONERROR);
-        throw std::runtime_error("OBJ load failed in BuildTextureResources");
-    }
-
-    std::wstring mtlPath = modelsDir + L"sponza.mtl";
-    auto matToTex = ParseMtlDiffuseMaps(mtlPath);
-    std::wstring mtlDir = GetDirPart_RS(mtlPath);
-
-    std::vector<std::wstring> texturePaths;
-    std::unordered_map<std::string, UINT> texIndexByFile;
-
-    auto addTexture = [&](const std::string& file) -> UINT
+    auto resolveTexture = [](const std::wstring& assetDir, const std::string& file) -> std::wstring
         {
-            std::string key = ToLowerA_RS(file);
+            if (file.empty())
+                return L"";
 
-            std::unordered_map<std::string, UINT>::iterator it = texIndexByFile.find(key);
-            if (it != texIndexByFile.end())
-                return it->second;
-
-            std::wstring rel = WidenAscii_RS(file);
-            for (size_t i = 0; i < rel.size(); ++i)
+            std::wstring rel(file.begin(), file.end());
+            for (wchar_t& c : rel)
             {
-                if (rel[i] == L'/')
-                    rel[i] = L'\\';
+                if (c == L'/')
+                    c = L'\\';
             }
 
-            std::wstring fullPath;
-
             if (rel.size() > 1 && rel[1] == L':')
+                return rel;
+
+            return assetDir + rel;
+        };
+
+    auto addTex = [&](const std::wstring& path, UINT solidRGBAIfMissing) -> UINT
+        {
+            UINT idx = (UINT)mTextures.size();
+            mTextures.push_back(nullptr);
+            mTextureUploads.push_back(nullptr);
+
+            if (!path.empty() && FileExists_RS(path))
             {
-                fullPath = rel;
+                LoadTexture_WIC(path, mTextures.back(), mTextureUploads.back());
             }
             else
             {
-                fullPath = mtlDir + rel;
+                CreateSolidTextureRGBA(solidRGBAIfMissing, mTextures.back(), mTextureUploads.back());
             }
 
-            if (!FileExists_RS(fullPath))
-            {
-                size_t slashPos = rel.find_last_of(L"\\/");
-                std::wstring filenameOnly = (slashPos == std::wstring::npos) ? rel : rel.substr(slashPos + 1);
-
-                std::wstring try1 = modelsDir + rel;
-                std::wstring try2 = modelsDir + filenameOnly;
-                std::wstring try3 = modelsDir + L"textures\\" + filenameOnly;
-                std::wstring try4 = mtlDir + filenameOnly;
-
-                if (FileExists_RS(try1))
-                    fullPath = try1;
-                else if (FileExists_RS(try2))
-                    fullPath = try2;
-                else if (FileExists_RS(try3))
-                    fullPath = try3;
-                else if (FileExists_RS(try4))
-                    fullPath = try4;
-                else
-                    fullPath = modelsDir + L"check.png";
-            }
-
-            UINT idx = (UINT)texturePaths.size();
-            texturePaths.push_back(fullPath);
-            texIndexByFile[key] = idx;
             return idx;
         };
 
-    const std::string fallbackTex = "check.png";
-
-    mSubmeshSrvIndex.clear();
-    mSubmeshSrvIndex.reserve(mDrawSubmeshes.size());
-
-    for (size_t i = 0; i < mDrawSubmeshes.size(); ++i)
-    {
-        const ObjSubmesh& sm = mDrawSubmeshes[i];
-        std::unordered_map<std::string, std::string>::iterator it = matToTex.find(ToLowerA_RS(sm.MaterialName));
-
-        if (it != matToTex.end())
+    auto tryResolveTexture = [&](const SceneMesh& scene, const std::string& file) -> std::wstring
         {
-            UINT idx = addTexture(it->second);
-            mSubmeshSrvIndex.push_back(idx);
-        }
-        else
+            if (file.empty())
+                return L"";
+
+            std::wstring rel(file.begin(), file.end());
+            for (wchar_t& c : rel)
+            {
+                if (c == L'/')
+                    c = L'\\';
+            }
+
+            std::wstring full = resolveTexture(scene.AssetDir, file);
+            if (FileExists_RS(full))
+                return full;
+
+            size_t slashPos = rel.find_last_of(L"\\/");
+            std::wstring fileOnly = (slashPos == std::wstring::npos) ? rel : rel.substr(slashPos + 1);
+
+            std::wstring exeDir = GetExeDir_RS();
+            std::wstring modelsDir = exeDir + L"Models\\";
+            std::wstring try1 = scene.AssetDir + fileOnly;
+            std::wstring try2 = modelsDir + fileOnly;
+            std::wstring try3 = modelsDir + rel;
+            std::wstring try4 = modelsDir + L"textures\\" + fileOnly;
+
+            if (FileExists_RS(try1)) return try1;
+            if (FileExists_RS(try2)) return try2;
+            if (FileExists_RS(try3)) return try3;
+            if (FileExists_RS(try4)) return try4;
+
+            return L"";
+        };
+
+    auto buildSceneMaterialSrvs = [&](SceneMesh& scene)
         {
-            UINT idx = addTexture(fallbackTex);
-            mSubmeshSrvIndex.push_back(idx);
-        }
-    }
+            scene.SubmeshBaseSrv.clear();
+            scene.SubmeshBaseSrv.reserve(scene.DrawSubmeshes.size());
 
-    if (texturePaths.empty())
-    {
-        std::wstring fallback = modelsDir + L"check.png";
-        texturePaths.push_back(fallback);
-    }
+            for (const ObjSubmesh& sm : scene.DrawSubmeshes)
+            {
+                ObjMaterialInfo mat{};
 
-    mTextures.clear();
-    mTextureUploads.clear();
-    mTextures.resize(texturePaths.size());
-    mTextureUploads.resize(texturePaths.size());
+                auto it = scene.CpuMesh.Materials.find(sm.MaterialName);
+                if (it == scene.CpuMesh.Materials.end())
+                {
+                    std::string key = sm.MaterialName;
+                    std::transform(key.begin(), key.end(), key.begin(),
+                        [](unsigned char c) { return (char)tolower(c); });
+                    it = scene.CpuMesh.Materials.find(key);
+                }
 
-    for (UINT i = 0; i < (UINT)texturePaths.size(); ++i)
-    {
-        LoadTexture_WIC(texturePaths[i], mTextures[i], mTextureUploads[i]);
-    }
+                if (it != scene.CpuMesh.Materials.end())
+                    mat = it->second;
+
+                std::wstring diff = tryResolveTexture(scene, mat.DiffuseMap);
+                std::wstring norm = tryResolveTexture(scene, mat.NormalMap);
+                std::wstring disp = tryResolveTexture(scene, mat.DisplacementMap);
+
+                UINT base = (UINT)mTextures.size();
+
+                addTex(diff, 0xFFFFFFFFu);   
+                addTex(norm, 0xFF8080FFu);   
+                addTex(disp, 0xFF000000u);   
+
+                scene.SubmeshBaseSrv.push_back(base);
+            }
+        };
+
+    buildSceneMaterialSrvs(mSponzaScene);
+    buildSceneMaterialSrvs(mTessScene);
 
     mModelTextureCount = (UINT)mTextures.size();
     mGBufferSrvStartIndex = mModelTextureCount;
@@ -547,14 +433,12 @@ void RenderingSystem::BuildDescriptorHeaps()
     srvHeapDesc.NumDescriptors = mModelTextureCount + 3 + extra;
     srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-
     ThrowIfFailed(mDevice->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&mSrvHeap)));
 
     D3D12_DESCRIPTOR_HEAP_DESC rtvHeapDesc = {};
     rtvHeapDesc.NumDescriptors = 3;
     rtvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
     rtvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-
     ThrowIfFailed(mDevice->CreateDescriptorHeap(&rtvHeapDesc, IID_PPV_ARGS(&mGBufferRtvHeap)));
 
     for (UINT i = 0; i < (UINT)mTextures.size(); ++i)
@@ -577,25 +461,13 @@ void RenderingSystem::BuildConstantBuffers()
     UINT lightSize = AlignCB_RS(sizeof(LightConstants));
 
     CD3DX12_HEAP_PROPERTIES uploadHeapProps(D3D12_HEAP_TYPE_UPLOAD);
-
     D3D12_RESOURCE_DESC geomCbDesc = CD3DX12_RESOURCE_DESC::Buffer(geomSize);
     D3D12_RESOURCE_DESC lightCbDesc = CD3DX12_RESOURCE_DESC::Buffer(lightSize);
 
-    ThrowIfFailed(mDevice->CreateCommittedResource(
-        &uploadHeapProps,
-        D3D12_HEAP_FLAG_NONE,
-        &geomCbDesc,
-        D3D12_RESOURCE_STATE_GENERIC_READ,
-        nullptr,
-        IID_PPV_ARGS(&mGeometryCB)));
-
-    ThrowIfFailed(mDevice->CreateCommittedResource(
-        &uploadHeapProps,
-        D3D12_HEAP_FLAG_NONE,
-        &lightCbDesc,
-        D3D12_RESOURCE_STATE_GENERIC_READ,
-        nullptr,
-        IID_PPV_ARGS(&mLightingCB)));
+    ThrowIfFailed(mDevice->CreateCommittedResource(&uploadHeapProps, D3D12_HEAP_FLAG_NONE, &geomCbDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&mGeometryCB)));
+    ThrowIfFailed(mDevice->CreateCommittedResource(&uploadHeapProps, D3D12_HEAP_FLAG_NONE, &lightCbDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&mLightingCB)));
 }
 
 void RenderingSystem::BuildRootSignatures()
@@ -605,8 +477,8 @@ void RenderingSystem::BuildRootSignatures()
         rootParams[0].InitAsConstantBufferView(0);
 
         CD3DX12_DESCRIPTOR_RANGE srvRange;
-        srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
-        rootParams[1].InitAsDescriptorTable(1, &srvRange, D3D12_SHADER_VISIBILITY_PIXEL);
+        srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 0);
+        rootParams[1].InitAsDescriptorTable(1, &srvRange, D3D12_SHADER_VISIBILITY_ALL);
 
         CD3DX12_STATIC_SAMPLER_DESC staticSamp(
             0,
@@ -622,23 +494,14 @@ void RenderingSystem::BuildRootSignatures()
 
         ComPtr<ID3DBlob> serializedRootSig;
         ComPtr<ID3DBlob> errorBlob;
-
-        ThrowIfFailed(D3D12SerializeRootSignature(
-            &rootSigDesc,
-            D3D_ROOT_SIGNATURE_VERSION_1,
-            &serializedRootSig,
-            &errorBlob));
-
-        ThrowIfFailed(mDevice->CreateRootSignature(
-            0,
-            serializedRootSig->GetBufferPointer(),
-            serializedRootSig->GetBufferSize(),
-            IID_PPV_ARGS(&mGeometryRootSig)));
+        ThrowIfFailed(D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1,
+            &serializedRootSig, &errorBlob));
+        ThrowIfFailed(mDevice->CreateRootSignature(0, serializedRootSig->GetBufferPointer(),
+            serializedRootSig->GetBufferSize(), IID_PPV_ARGS(&mGeometryRootSig)));
     }
 
     {
         CD3DX12_ROOT_PARAMETER rootParams[2];
-
         CD3DX12_DESCRIPTOR_RANGE srvRange;
         srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 0);
         rootParams[0].InitAsDescriptorTable(1, &srvRange, D3D12_SHADER_VISIBILITY_PIXEL);
@@ -658,67 +521,45 @@ void RenderingSystem::BuildRootSignatures()
 
         ComPtr<ID3DBlob> serializedRootSig;
         ComPtr<ID3DBlob> errorBlob;
-
-        ThrowIfFailed(D3D12SerializeRootSignature(
-            &rootSigDesc,
-            D3D_ROOT_SIGNATURE_VERSION_1,
-            &serializedRootSig,
-            &errorBlob));
-
-        ThrowIfFailed(mDevice->CreateRootSignature(
-            0,
-            serializedRootSig->GetBufferPointer(),
-            serializedRootSig->GetBufferSize(),
-            IID_PPV_ARGS(&mLightingRootSig)));
+        ThrowIfFailed(D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1,
+            &serializedRootSig, &errorBlob));
+        ThrowIfFailed(mDevice->CreateRootSignature(0, serializedRootSig->GetBufferPointer(),
+            serializedRootSig->GetBufferSize(), IID_PPV_ARGS(&mLightingRootSig)));
     }
 }
 
 void RenderingSystem::BuildPSOs()
 {
-    ComPtr<ID3DBlob> gVs;
-    ComPtr<ID3DBlob> gPs;
-    ComPtr<ID3DBlob> lVs;
-    ComPtr<ID3DBlob> lPs;
-    ComPtr<ID3DBlob> errors;
+    ComPtr<ID3DBlob> gVs, gPs, tessVs, gHs, gDs, lVs, lPs, errors;
     HRESULT hr = S_OK;
 
-    hr = D3DCompileFromFile(L"Shaders/GBufferVS.hlsl", nullptr, nullptr, "VSMain", "vs_5_0",
-        D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION, 0, &gVs, &errors);
-    if (FAILED(hr))
-    {
-        if (errors) MessageBoxA(nullptr, (char*)errors->GetBufferPointer(), "GBufferVS compile error", MB_OK);
-        ThrowIfFailed(hr);
-    }
+    auto compile = [&](const wchar_t* path, const char* entry, const char* target, ComPtr<ID3DBlob>& out)
+        {
+            errors.Reset();
+            hr = D3DCompileFromFile(path, nullptr, nullptr, entry, target,
+                D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION, 0, &out, &errors);
+            if (FAILED(hr))
+            {
+                if (errors) MessageBoxA(nullptr, (char*)errors->GetBufferPointer(), "Shader compile error", MB_OK);
+                ThrowIfFailed(hr);
+            }
+        };
 
-    hr = D3DCompileFromFile(L"Shaders/GBufferPS.hlsl", nullptr, nullptr, "PSMain", "ps_5_0",
-        D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION, 0, &gPs, &errors);
-    if (FAILED(hr))
-    {
-        if (errors) MessageBoxA(nullptr, (char*)errors->GetBufferPointer(), "GBufferPS compile error", MB_OK);
-        ThrowIfFailed(hr);
-    }
-
-    hr = D3DCompileFromFile(L"Shaders/DeferredLightVS.hlsl", nullptr, nullptr, "VSMain", "vs_5_0",
-        D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION, 0, &lVs, &errors);
-    if (FAILED(hr))
-    {
-        if (errors) MessageBoxA(nullptr, (char*)errors->GetBufferPointer(), "DeferredLightVS compile error", MB_OK);
-        ThrowIfFailed(hr);
-    }
-
-    hr = D3DCompileFromFile(L"Shaders/DeferredLightPS.hlsl", nullptr, nullptr, "PSMain", "ps_5_0",
-        D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION, 0, &lPs, &errors);
-    if (FAILED(hr))
-    {
-        if (errors) MessageBoxA(nullptr, (char*)errors->GetBufferPointer(), "DeferredLightPS compile error", MB_OK);
-        ThrowIfFailed(hr);
-    }
+    compile(L"Shaders/GBufferVS.hlsl", "VSMain", "vs_5_0", gVs);
+    compile(L"Shaders/GBufferPS.hlsl", "PSMain", "ps_5_0", gPs);
+    compile(L"Shaders/GBufferTessVS.hlsl", "VSMain", "vs_5_0", tessVs);
+    compile(L"Shaders/GBufferHS.hlsl", "HSMain", "hs_5_0", gHs);
+    compile(L"Shaders/GBufferDS.hlsl", "DSMain", "ds_5_0", gDs);
+    compile(L"Shaders/DeferredLightVS.hlsl", "VSMain", "vs_5_0", lVs);
+    compile(L"Shaders/DeferredLightPS.hlsl", "PSMain", "ps_5_0", lPs);
 
     D3D12_INPUT_ELEMENT_DESC inputLayout[] =
     {
-        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
         { "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
+        { "TANGENT",  0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "BINORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 36, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 48, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
     };
 
     {
@@ -731,7 +572,6 @@ void RenderingSystem::BuildPSOs()
         CD3DX12_RASTERIZER_DESC rast(D3D12_DEFAULT);
         rast.CullMode = D3D12_CULL_MODE_NONE;
         psoDesc.RasterizerState = rast;
-
         psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
         psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
         psoDesc.SampleMask = UINT_MAX;
@@ -742,8 +582,32 @@ void RenderingSystem::BuildPSOs()
         psoDesc.RTVFormats[2] = DXGI_FORMAT_R16G16B16A16_FLOAT;
         psoDesc.DSVFormat = DXGI_FORMAT_D24_UNORM_S8_UINT;
         psoDesc.SampleDesc.Count = 1;
-
         ThrowIfFailed(mDevice->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&mGeometryPSO)));
+    }
+
+    {
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
+        psoDesc.InputLayout = { inputLayout, _countof(inputLayout) };
+        psoDesc.pRootSignature = mGeometryRootSig.Get();
+        psoDesc.VS = { tessVs->GetBufferPointer(), tessVs->GetBufferSize() };
+        psoDesc.HS = { gHs->GetBufferPointer(), gHs->GetBufferSize() };
+        psoDesc.DS = { gDs->GetBufferPointer(), gDs->GetBufferSize() };
+        psoDesc.PS = { gPs->GetBufferPointer(), gPs->GetBufferSize() };
+
+        CD3DX12_RASTERIZER_DESC rast(D3D12_DEFAULT);
+        rast.CullMode = D3D12_CULL_MODE_NONE;
+        psoDesc.RasterizerState = rast;
+        psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+        psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+        psoDesc.SampleMask = UINT_MAX;
+        psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH;
+        psoDesc.NumRenderTargets = 3;
+        psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+        psoDesc.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        psoDesc.RTVFormats[2] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        psoDesc.DSVFormat = DXGI_FORMAT_D24_UNORM_S8_UINT;
+        psoDesc.SampleDesc.Count = 1;
+        ThrowIfFailed(mDevice->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&mTessPSO)));
     }
 
     {
@@ -752,7 +616,6 @@ void RenderingSystem::BuildPSOs()
         psoDesc.pRootSignature = mLightingRootSig.Get();
         psoDesc.VS = { lVs->GetBufferPointer(), lVs->GetBufferSize() };
         psoDesc.PS = { lPs->GetBufferPointer(), lPs->GetBufferSize() };
-
         psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
         psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
 
@@ -765,14 +628,15 @@ void RenderingSystem::BuildPSOs()
         psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
         psoDesc.NumRenderTargets = 1;
         psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
-        psoDesc.DSVFormat = DXGI_FORMAT_D24_UNORM_S8_UINT;
+        psoDesc.DSVFormat = DXGI_FORMAT_UNKNOWN;
         psoDesc.SampleDesc.Count = 1;
-
         ThrowIfFailed(mDevice->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&mLightingPSO)));
     }
 }
 
-void RenderingSystem::LoadTexture_WIC(const std::wstring& filePath, ComPtr<ID3D12Resource>& tex, ComPtr<ID3D12Resource>& upload)
+void RenderingSystem::LoadTexture_WIC(const std::wstring& filePath,
+    ComPtr<ID3D12Resource>& tex,
+    ComPtr<ID3D12Resource>& upload)
 {
     if (EndsWithNoCase_RS(filePath, L".tga"))
     {
@@ -781,13 +645,12 @@ void RenderingSystem::LoadTexture_WIC(const std::wstring& filePath, ComPtr<ID3D1
     }
 
     ComPtr<IWICImagingFactory> factory;
-    ThrowIfFailed(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory)));
+    ThrowIfFailed(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+        IID_PPV_ARGS(&factory)));
 
     ComPtr<IWICBitmapDecoder> decoder;
-    HRESULT hr = factory->CreateDecoderFromFilename(
-        filePath.c_str(), nullptr, GENERIC_READ,
-        WICDecodeMetadataCacheOnDemand, &decoder);
-
+    HRESULT hr = factory->CreateDecoderFromFilename(filePath.c_str(), nullptr, GENERIC_READ,
+        WICDecodeMetadataCacheOnLoad, &decoder);
     if (FAILED(hr))
     {
         MessageBoxW(nullptr, filePath.c_str(), L"Cannot load texture (WIC)", MB_OK | MB_ICONERROR);
@@ -797,52 +660,29 @@ void RenderingSystem::LoadTexture_WIC(const std::wstring& filePath, ComPtr<ID3D1
     ComPtr<IWICBitmapFrameDecode> frame;
     ThrowIfFailed(decoder->GetFrame(0, &frame));
 
-    UINT width = 0;
-    UINT height = 0;
+    UINT width = 0, height = 0;
     ThrowIfFailed(frame->GetSize(&width, &height));
 
     ComPtr<IWICFormatConverter> converter;
     ThrowIfFailed(factory->CreateFormatConverter(&converter));
+    ThrowIfFailed(converter->Initialize(frame.Get(), GUID_WICPixelFormat32bppRGBA,
+        WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom));
 
-    ThrowIfFailed(converter->Initialize(
-        frame.Get(),
-        GUID_WICPixelFormat32bppRGBA,
-        WICBitmapDitherTypeNone,
-        nullptr, 0.0,
-        WICBitmapPaletteTypeCustom));
-
-    const UINT bytesPerPixel = 4;
-    const UINT rowPitch = width * bytesPerPixel;
+    const UINT rowPitch = width * 4;
     const UINT imageSize = rowPitch * height;
-
     std::vector<uint8_t> pixels(imageSize);
     ThrowIfFailed(converter->CopyPixels(nullptr, rowPitch, imageSize, pixels.data()));
 
-    D3D12_RESOURCE_DESC texDesc = CD3DX12_RESOURCE_DESC::Tex2D(
-        DXGI_FORMAT_R8G8B8A8_UNORM, width, height, 1, 1);
-
+    D3D12_RESOURCE_DESC texDesc = CD3DX12_RESOURCE_DESC::Tex2D(DXGI_FORMAT_R8G8B8A8_UNORM, width, height, 1, 1);
     CD3DX12_HEAP_PROPERTIES defaultHeap(D3D12_HEAP_TYPE_DEFAULT);
-
-    ThrowIfFailed(mDevice->CreateCommittedResource(
-        &defaultHeap,
-        D3D12_HEAP_FLAG_NONE,
-        &texDesc,
-        D3D12_RESOURCE_STATE_COPY_DEST,
-        nullptr,
-        IID_PPV_ARGS(&tex)));
+    ThrowIfFailed(mDevice->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE, &texDesc,
+        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&tex)));
 
     const UINT64 uploadBufferSize = GetRequiredIntermediateSize(tex.Get(), 0, 1);
-
     CD3DX12_HEAP_PROPERTIES uploadHeap(D3D12_HEAP_TYPE_UPLOAD);
     D3D12_RESOURCE_DESC uploadDesc = CD3DX12_RESOURCE_DESC::Buffer(uploadBufferSize);
-
-    ThrowIfFailed(mDevice->CreateCommittedResource(
-        &uploadHeap,
-        D3D12_HEAP_FLAG_NONE,
-        &uploadDesc,
-        D3D12_RESOURCE_STATE_GENERIC_READ,
-        nullptr,
-        IID_PPV_ARGS(&upload)));
+    ThrowIfFailed(mDevice->CreateCommittedResource(&uploadHeap, D3D12_HEAP_FLAG_NONE, &uploadDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&upload)));
 
     D3D12_SUBRESOURCE_DATA subData = {};
     subData.pData = pixels.data();
@@ -850,11 +690,44 @@ void RenderingSystem::LoadTexture_WIC(const std::wstring& filePath, ComPtr<ID3D1
     subData.SlicePitch = imageSize;
 
     UpdateSubresources(mInitCmdList, tex.Get(), upload.Get(), 0, 0, 1, &subData);
+    auto barrier = CD3DX12_RESOURCE_BARRIER::Transition(tex.Get(),
+        D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    mInitCmdList->ResourceBarrier(1, &barrier);
+}
 
-    CD3DX12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(
-        tex.Get(),
-        D3D12_RESOURCE_STATE_COPY_DEST,
-        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+void RenderingSystem::CreateSolidTextureRGBA(UINT rgba,
+    ComPtr<ID3D12Resource>& tex,
+    ComPtr<ID3D12Resource>& upload)
+{
+    const UINT width = 1;
+    const UINT height = 1;
+    uint8_t pixel[4] =
+    {
+        (uint8_t)((rgba >> 16) & 0xFF),
+        (uint8_t)((rgba >> 8) & 0xFF),
+        (uint8_t)(rgba & 0xFF),
+        (uint8_t)((rgba >> 24) & 0xFF)
+    };
+
+    D3D12_RESOURCE_DESC texDesc = CD3DX12_RESOURCE_DESC::Tex2D(DXGI_FORMAT_R8G8B8A8_UNORM, width, height, 1, 1);
+    CD3DX12_HEAP_PROPERTIES defaultHeap(D3D12_HEAP_TYPE_DEFAULT);
+    ThrowIfFailed(mDevice->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE, &texDesc,
+        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&tex)));
+
+    const UINT64 uploadBufferSize = GetRequiredIntermediateSize(tex.Get(), 0, 1);
+    CD3DX12_HEAP_PROPERTIES uploadHeap(D3D12_HEAP_TYPE_UPLOAD);
+    D3D12_RESOURCE_DESC uploadDesc = CD3DX12_RESOURCE_DESC::Buffer(uploadBufferSize);
+    ThrowIfFailed(mDevice->CreateCommittedResource(&uploadHeap, D3D12_HEAP_FLAG_NONE, &uploadDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&upload)));
+
+    D3D12_SUBRESOURCE_DATA subData = {};
+    subData.pData = pixel;
+    subData.RowPitch = 4;
+    subData.SlicePitch = 4;
+
+    UpdateSubresources(mInitCmdList, tex.Get(), upload.Get(), 0, 0, 1, &subData);
+    auto barrier = CD3DX12_RESOURCE_BARRIER::Transition(tex.Get(),
+        D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     mInitCmdList->ResourceBarrier(1, &barrier);
 }
 
@@ -870,162 +743,8 @@ void RenderingSystem::CreateTextureSrv(UINT srvIndex, ID3D12Resource* tex)
 
     CD3DX12_CPU_DESCRIPTOR_HANDLE hCpu(mSrvHeap->GetCPUDescriptorHandleForHeapStart());
     hCpu.Offset((INT)srvIndex, mCbvSrvUavDescriptorSize);
-
     mDevice->CreateShaderResourceView(tex, &srvDesc, hCpu);
 }
-
-
-XMMATRIX RenderingSystem::GetSceneWorldMatrix() const
-{
-    return
-        XMMatrixScaling(0.1f, 0.1f, 0.1f) *
-        XMMatrixRotationX(mObjectPitch) *
-        XMMatrixRotationY(mObjectYaw) *
-        XMMatrixTranslation(0.0f, -1.0f, 0.0f);
-}
-
-bool RenderingSystem::RayIntersectsTriangle(
-    FXMVECTOR rayOrigin,
-    FXMVECTOR rayDir,
-    FXMVECTOR v0,
-    FXMVECTOR v1,
-    FXMVECTOR v2,
-    float& outT) const
-{
-    const float eps = 1e-6f;
-
-    XMVECTOR e1 = v1 - v0;
-    XMVECTOR e2 = v2 - v0;
-    XMVECTOR p = XMVector3Cross(rayDir, e2);
-    float det = XMVectorGetX(XMVector3Dot(e1, p));
-
-    if (fabs(det) < eps)
-        return false;
-
-    float invDet = 1.0f / det;
-    XMVECTOR tvec = rayOrigin - v0;
-
-    float u = XMVectorGetX(XMVector3Dot(tvec, p)) * invDet;
-    if (u < 0.0f || u > 1.0f)
-        return false;
-
-    XMVECTOR q = XMVector3Cross(tvec, e1);
-    float v = XMVectorGetX(XMVector3Dot(rayDir, q)) * invDet;
-    if (v < 0.0f || (u + v) > 1.0f)
-        return false;
-
-    float t = XMVectorGetX(XMVector3Dot(e2, q)) * invDet;
-    if (t < eps)
-        return false;
-
-    outT = t;
-    return true;
-}
-
-bool RenderingSystem::RaycastScene(
-    const XMFLOAT3& rayOrigin,
-    const XMFLOAT3& rayDir,
-    XMFLOAT3& outHitPos) const
-{
-    if (mCpuVertices.empty() || mCpuIndices.empty())
-        return false;
-
-    XMMATRIX world = GetSceneWorldMatrix();
-
-    XMVECTOR ro = XMLoadFloat3(&rayOrigin);
-    XMVECTOR rd = XMVector3Normalize(XMLoadFloat3(&rayDir));
-
-    float bestT = FLT_MAX;
-    bool hit = false;
-
-    for (size_t i = 0; i + 2 < mCpuIndices.size(); i += 3)
-    {
-        const VertexPosNormalTex& a = mCpuVertices[mCpuIndices[i + 0]];
-        const VertexPosNormalTex& b = mCpuVertices[mCpuIndices[i + 1]];
-        const VertexPosNormalTex& c = mCpuVertices[mCpuIndices[i + 2]];
-
-        XMVECTOR v0 = XMVector3TransformCoord(XMLoadFloat3(&a.Pos), world);
-        XMVECTOR v1 = XMVector3TransformCoord(XMLoadFloat3(&b.Pos), world);
-        XMVECTOR v2 = XMVector3TransformCoord(XMLoadFloat3(&c.Pos), world);
-
-        float t = 0.0f;
-        if (RayIntersectsTriangle(ro, rd, v0, v1, v2, t) && t < bestT)
-        {
-            bestT = t;
-            hit = true;
-        }
-    }
-
-    if (!hit)
-        return false;
-
-    XMVECTOR hitPos = ro + rd * bestT;
-    XMStoreFloat3(&outHitPos, hitPos);
-    return true;
-}
-
-void RenderingSystem::TryShootLight(const InputDevice& input)
-{
-    if (!input.WasKeyPressed(VK_SPACE))
-        return;
-
-    XMFLOAT3 rayDir;
-    rayDir.x = cosf(mPitch) * sinf(mYaw);
-    rayDir.y = sinf(mPitch);
-    rayDir.z = cosf(mPitch) * cosf(mYaw);
-
-    XMFLOAT3 hitPos;
-    if (!RaycastScene(mCameraPos, rayDir, hitPos))
-        return;
-
-    const int slot = mNextShotLight;
-    mNextShotLight = (mNextShotLight + 1) % MaxShotLights;
-
-    ShotLight& s = mShotLights[slot];
-    s.Active = true;
-    s.Flying = true;
-    s.Position = mCameraPos;
-    s.Target = hitPos;
-    s.Color = XMFLOAT3(1.0f, 0.75f, 0.2f);
-    s.Range = 12.0f;
-    s.Intensity = 2.5f;
-
-    XMVECTOR p0 = XMLoadFloat3(&s.Position);
-    XMVECTOR p1 = XMLoadFloat3(&s.Target);
-    XMVECTOR dir = XMVector3Normalize(p1 - p0);
-    XMVECTOR vel = dir * 12.0f;
-    XMStoreFloat3(&s.Velocity, vel);
-}
-
-void RenderingSystem::UpdateShotLights(float deltaTime)
-{
-    for (int i = 0; i < MaxShotLights; ++i)
-    {
-        ShotLight& s = mShotLights[i];
-        if (!s.Active || !s.Flying)
-            continue;
-
-        XMVECTOR pos = XMLoadFloat3(&s.Position);
-        XMVECTOR target = XMLoadFloat3(&s.Target);
-        XMVECTOR vel = XMLoadFloat3(&s.Velocity);
-
-        XMVECTOR toTarget = target - pos;
-        float distLeft = XMVectorGetX(XMVector3Length(toTarget));
-        float step = XMVectorGetX(XMVector3Length(vel)) * deltaTime;
-
-        if (step >= distLeft)
-        {
-            s.Position = s.Target;
-            s.Flying = false;
-        }
-        else
-        {
-            pos += vel * deltaTime;
-            XMStoreFloat3(&s.Position, pos);
-        }
-    }
-}
-
 
 void RenderingSystem::UpdateCamera(const InputDevice& input, float dt)
 {
@@ -1076,9 +795,13 @@ void RenderingSystem::UpdateObjectRotation(const InputDevice& input)
     }
 }
 
-void RenderingSystem::UpdateGeometryCB(float /*totalTime*/)
+void RenderingSystem::UpdateGeometryCB(const SceneMesh& scene)
 {
-    XMMATRIX world = GetSceneWorldMatrix();
+    XMMATRIX baseWorld = XMLoadFloat4x4(&scene.World);
+    XMMATRIX world =
+        XMMatrixRotationX(mObjectPitch) *
+        XMMatrixRotationY(mObjectYaw) *
+        baseWorld;
 
     XMVECTOR pos = XMLoadFloat3(&mCameraPos);
     XMVECTOR forward = XMVectorSet(
@@ -1089,13 +812,18 @@ void RenderingSystem::UpdateGeometryCB(float /*totalTime*/)
 
     XMMATRIX view = XMMatrixLookAtLH(pos, pos + forward, XMVectorSet(0, 1, 0, 0));
     XMMATRIX proj = XMLoadFloat4x4(&mProj);
-    XMMATRIX wvp = world * view * proj;
+    XMMATRIX viewProj = view * proj;
 
-    XMStoreFloat4x4(&mGeometryData.WorldViewProj, XMMatrixTranspose(wvp));
     XMStoreFloat4x4(&mGeometryData.World, XMMatrixTranspose(world));
-
+    XMStoreFloat4x4(&mGeometryData.ViewProj, XMMatrixTranspose(viewProj));
     mGeometryData.Tiling = XMFLOAT2(1.0f, 1.0f);
     mGeometryData.UVOffset = XMFLOAT2(0.0f, 0.0f);
+    mGeometryData.EyePosW = mCameraPos;
+    mGeometryData.TessMin = scene.TessMin;
+    mGeometryData.TessMax = scene.TessMax;
+    mGeometryData.TessMaxDistance = scene.TessMaxDistance;
+    mGeometryData.DisplacementScale = scene.DisplacementScale;
+    mGeometryData.NormalMapFlipY = scene.NormalMapFlipY;
 
     void* mapped = nullptr;
     ThrowIfFailed(mGeometryCB->Map(0, nullptr, &mapped));
@@ -1106,67 +834,71 @@ void RenderingSystem::UpdateGeometryCB(float /*totalTime*/)
 void RenderingSystem::UpdateLightCB(float totalTime)
 {
     mLightingData.EyePosW = mCameraPos;
-    mLightingData.AmbientColor = XMFLOAT3(0.18f, 0.18f, 0.20f);
 
-    mLightingData.DirLight.Direction = XMFLOAT3(0.5f, -1.0f, -0.3f);
+    mLightingData.AmbientColor = { 0.18f, 0.18f, 0.20f };
+
+    mLightingData.DirLight.Direction = { 0.5f, -1.0f, -0.3f };
+    mLightingData.DirLight.Color = { 1.0f, 1.0f, 1.0f };
     mLightingData.DirLight.Intensity = 1.0f;
-    mLightingData.DirLight.Color = XMFLOAT3(1.0f, 1.0f, 1.0f);
 
-    mLightingData.PointLights[0].Position = XMFLOAT3(8.0f * cosf(totalTime), 4.0f, 8.0f * sinf(totalTime));
+    mLightingData.PointLights[0].Position = { 8.0f * cosf(totalTime), 4.0f, 8.0f * sinf(totalTime) };
     mLightingData.PointLights[0].Range = 20.0f;
-    mLightingData.PointLights[0].Color = XMFLOAT3(1.0f, 0.2f, 0.2f);
+    mLightingData.PointLights[0].Color = { 1.0f, 0.2f, 0.2f };
     mLightingData.PointLights[0].Intensity = 2.0f;
 
-    mLightingData.PointLights[1].Position = XMFLOAT3(8.0f * cosf(-0.6f * totalTime), 6.0f, 8.0f * sinf(-0.6f * totalTime));
+    mLightingData.PointLights[1].Position = { 8.0f * cosf(-0.6f * totalTime), 6.0f, 8.0f * sinf(-0.6f * totalTime) };
     mLightingData.PointLights[1].Range = 20.0f;
-    mLightingData.PointLights[1].Color = XMFLOAT3(0.2f, 0.4f, 1.0f);
+    mLightingData.PointLights[1].Color = { 0.2f, 0.4f, 1.0f };
     mLightingData.PointLights[1].Intensity = 2.0f;
 
-    for (int i = 0; i < MaxShotLights; ++i)
-    {
-        const int dst = OriginalPointLightCount + i;
-        mLightingData.PointLights[dst].Position = XMFLOAT3(0.0f, -1000.0f, 0.0f);
-        mLightingData.PointLights[dst].Range = 1.0f;
-        mLightingData.PointLights[dst].Color = XMFLOAT3(0.0f, 0.0f, 0.0f);
-        mLightingData.PointLights[dst].Intensity = 0.0f;
-    }
-
-    for (int i = 0; i < MaxShotLights; ++i)
-    {
-        if (!mShotLights[i].Active)
-            continue;
-
-        const int dst = OriginalPointLightCount + i;
-        mLightingData.PointLights[dst].Position = mShotLights[i].Position;
-        mLightingData.PointLights[dst].Range = mShotLights[i].Range;
-        mLightingData.PointLights[dst].Color = mShotLights[i].Color;
-        mLightingData.PointLights[dst].Intensity = mShotLights[i].Intensity;
-    }
-
-    mLightingData.SpotLight.Position = XMFLOAT3(0.0f, 10.0f, -5.0f);
-    mLightingData.SpotLight.Direction = XMFLOAT3(0.0f, -1.0f, 0.3f);
+    mLightingData.SpotLight.Position = { 0.0f, 10.0f, -5.0f };
+    mLightingData.SpotLight.Direction = { 0.0f, -1.0f, 0.3f };
     mLightingData.SpotLight.Range = 30.0f;
     mLightingData.SpotLight.SpotPower = 24.0f;
-    mLightingData.SpotLight.Color = XMFLOAT3(0.9f, 1.0f, 0.7f);
+    mLightingData.SpotLight.Color = { 0.9f, 1.0f, 0.7f };
     mLightingData.SpotLight.Intensity = 2.0f;
 
-    void* mapped = nullptr;
-    ThrowIfFailed(mLightingCB->Map(0, nullptr, &mapped));
+    BYTE* mapped = nullptr;
+    D3D12_RANGE readRange = {};
+    ThrowIfFailed(mLightingCB->Map(0, &readRange, reinterpret_cast<void**>(&mapped)));
     memcpy(mapped, &mLightingData, sizeof(LightConstants));
     mLightingCB->Unmap(0, nullptr);
 }
 
 void RenderingSystem::Update(float totalTime, float deltaTime, const InputDevice& input)
 {
+    if (input.IsKeyDown('1'))
+    {
+        mMode = RenderMode::Sponza;
+        mCameraPos = { 0.0f, 1.5f, -2.0f };
+        mYaw = 0.0f;
+        mPitch = 0.0f;
+        mObjectYaw = 0.0f;
+        mObjectPitch = 0.0f;
+    }
+
+    if (input.IsKeyDown('2'))
+    {
+        mMode = RenderMode::Tessellation;
+        mCameraPos = { 0.0f, 0.0f, 0.0f };
+        mYaw = 0.0f;
+        mPitch = 0.0f;
+        mObjectYaw = 0.0f;
+        mObjectPitch = 0.0f;
+    }
+
     UpdateObjectRotation(input);
     UpdateCamera(input, deltaTime);
-    TryShootLight(input);
-    UpdateShotLights(deltaTime);
-    UpdateGeometryCB(totalTime);
+
+    const SceneMesh& activeScene = (mMode == RenderMode::Sponza) ? mSponzaScene : mTessScene;
+    UpdateGeometryCB(activeScene);
     UpdateLightCB(totalTime);
 }
 
-void RenderingSystem::DrawGeometryPass(ID3D12GraphicsCommandList* cmdList, D3D12_CPU_DESCRIPTOR_HANDLE depthDsv)
+void RenderingSystem::DrawSceneGeometryPass(
+    ID3D12GraphicsCommandList* cmdList,
+    const SceneMesh& scene,
+    D3D12_CPU_DESCRIPTOR_HANDLE depthDsv)
 {
     mGBuffer.TransitionToRenderTarget(cmdList);
     mGBuffer.Clear(cmdList);
@@ -1179,29 +911,29 @@ void RenderingSystem::DrawGeometryPass(ID3D12GraphicsCommandList* cmdList, D3D12
     };
 
     cmdList->OMSetRenderTargets(3, rtvs, TRUE, &depthDsv);
-
-    cmdList->SetPipelineState(mGeometryPSO.Get());
+    cmdList->SetPipelineState(scene.UseTessellation ? mTessPSO.Get() : mGeometryPSO.Get());
     cmdList->SetGraphicsRootSignature(mGeometryRootSig.Get());
 
-    cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    cmdList->IASetVertexBuffers(0, 1, &mVBV);
-    cmdList->IASetIndexBuffer(&mIBV);
+    cmdList->IASetPrimitiveTopology(scene.UseTessellation
+        ? D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST
+        : D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    cmdList->IASetVertexBuffers(0, 1, &scene.VBV);
+    cmdList->IASetIndexBuffer(&scene.IBV);
     cmdList->SetGraphicsRootConstantBufferView(0, mGeometryCB->GetGPUVirtualAddress());
 
     ID3D12DescriptorHeap* heaps[] = { mSrvHeap.Get() };
     cmdList->SetDescriptorHeaps(1, heaps);
 
     CD3DX12_GPU_DESCRIPTOR_HANDLE hGpu(mSrvHeap->GetGPUDescriptorHandleForHeapStart());
-
-    for (size_t i = 0; i < mDrawSubmeshes.size(); ++i)
+    for (size_t i = 0; i < scene.DrawSubmeshes.size(); ++i)
     {
-        UINT srvIdx = (i < mSubmeshSrvIndex.size()) ? mSubmeshSrvIndex[i] : 0;
+        UINT baseSrv = (i < scene.SubmeshBaseSrv.size()) ? scene.SubmeshBaseSrv[i] : 0;
         CD3DX12_GPU_DESCRIPTOR_HANDLE handle = hGpu;
-        handle.Offset((INT)srvIdx, mCbvSrvUavDescriptorSize);
-
+        handle.Offset((INT)baseSrv, mCbvSrvUavDescriptorSize);
         cmdList->SetGraphicsRootDescriptorTable(1, handle);
 
-        const ObjSubmesh& sm = mDrawSubmeshes[i];
+        const ObjSubmesh& sm = scene.DrawSubmeshes[i];
         cmdList->DrawIndexedInstanced(sm.IndexCount, 1, sm.StartIndex, 0, 0);
     }
 
@@ -1225,7 +957,6 @@ void RenderingSystem::DrawLightingPass(ID3D12GraphicsCommandList* cmdList, D3D12
 
     cmdList->SetGraphicsRootDescriptorTable(0, gbufSrvGpu);
     cmdList->SetGraphicsRootConstantBufferView(1, mLightingCB->GetGPUVirtualAddress());
-
     cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cmdList->DrawInstanced(3, 1, 0, 0);
 }
@@ -1235,6 +966,10 @@ void RenderingSystem::Draw(
     D3D12_CPU_DESCRIPTOR_HANDLE backBufferRtv,
     D3D12_CPU_DESCRIPTOR_HANDLE depthDsv)
 {
-    DrawGeometryPass(cmdList, depthDsv);
+    ID3D12DescriptorHeap* heaps[] = { mSrvHeap.Get() };
+    cmdList->SetDescriptorHeaps(1, heaps);
+
+    const SceneMesh& activeScene = (mMode == RenderMode::Sponza) ? mSponzaScene : mTessScene;
+    DrawSceneGeometryPass(cmdList, activeScene, depthDsv);
     DrawLightingPass(cmdList, backBufferRtv);
 }
