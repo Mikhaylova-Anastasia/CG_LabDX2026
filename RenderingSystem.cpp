@@ -240,9 +240,10 @@ void RenderingSystem::BuildSceneGeometry()
     mTessScene.AssetDir = GetDirPart_RS(mTessScene.ObjPath);
     mTessScene.UseTessellation = true;
     mTessScene.TessMin = 1.0f;
-    mTessScene.TessMax = 6.0f;
-    mTessScene.TessMaxDistance = 10.0f;
-    mTessScene.DisplacementScale = 0.3f;   
+    mTessScene.TessMax = 8.0f;
+    mTessScene.TessMaxDistance = 7.0f;
+    mTessScene.DisplacementScale = 0.15f;
+    
     mTessScene.NormalMapFlipY = 0.0f;
 
     XMStoreFloat4x4(&mTessScene.World,

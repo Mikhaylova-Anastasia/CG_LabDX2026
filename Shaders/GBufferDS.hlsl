@@ -50,16 +50,53 @@ DSOutput DSMain(
 {
     DSOutput o;
 
-    float3 posL = patch[0].PosL * bary.x + patch[1].PosL * bary.y + patch[2].PosL * bary.z;
-    float3 nL = normalize(patch[0].NormalL * bary.x + patch[1].NormalL * bary.y + patch[2].NormalL * bary.z);
-    float3 tL = normalize(patch[0].TangentL * bary.x + patch[1].TangentL * bary.y + patch[2].TangentL * bary.z);
-    float3 bL = normalize(patch[0].BitangentL * bary.x + patch[1].BitangentL * bary.y + patch[2].BitangentL * bary.z);
-    float2 tex = (patch[0].Tex * bary.x + patch[1].Tex * bary.y + patch[2].Tex * bary.z) * gTiling + gUVOffset;
+    float3 posL =
+        patch[0].PosL * bary.x +
+        patch[1].PosL * bary.y +
+        patch[2].PosL * bary.z;
+
+    float3 nL = normalize(
+        patch[0].NormalL * bary.x +
+        patch[1].NormalL * bary.y +
+        patch[2].NormalL * bary.z);
+
+    float3 tL = normalize(
+        patch[0].TangentL * bary.x +
+        patch[1].TangentL * bary.y +
+        patch[2].TangentL * bary.z);
+
+    float3 bL = normalize(
+        patch[0].BitangentL * bary.x +
+        patch[1].BitangentL * bary.y +
+        patch[2].BitangentL * bary.z);
+
+    float2 tex =
+        (patch[0].Tex * bary.x +
+         patch[1].Tex * bary.y +
+         patch[2].Tex * bary.z) * gTiling + gUVOffset;
 
     float h = gDisplacementMap.SampleLevel(gSam, tex, 0).r;
-    posL += nL * (h * gDisplacementScale);
+
+    
+    float3 basePosW = mul(float4(posL, 1.0f), gWorld).xyz;
+    float distToEye = distance(basePosW, gEyePosW);
+
+
+    float nearFactor = 1.0f - saturate((distToEye - 1.0f) / 6.0f);
+    nearFactor = nearFactor * nearFactor;
+
+   
+    float skullMask = saturate((h - 0.30f) / 0.20f);
+    skullMask = skullMask * skullMask;
+
+    
+    float dispScale = lerp(gDisplacementScale * 0.35f, gDisplacementScale * 3.5f, nearFactor);
+
+    
+    posL += nL * (skullMask * dispScale);
 
     float4 posW = mul(float4(posL, 1.0f), gWorld);
+
     o.PosW = posW.xyz;
     o.PosH = mul(posW, gViewProj);
     o.NormalW = normalize(mul(float4(nL, 0.0f), gWorld).xyz);
