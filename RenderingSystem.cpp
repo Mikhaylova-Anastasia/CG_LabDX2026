@@ -2,6 +2,17 @@
 #include <fstream>
 #include <sstream>
 #include <algorithm>
+#include <cmath>
+#include <random>
+#include <cfloat>
+
+#ifdef min
+#undef min
+#endif
+
+#ifdef max
+#undef max
+#endif
 
 using namespace DirectX;
 using Microsoft::WRL::ComPtr;
@@ -221,6 +232,7 @@ void RenderingSystem::BuildSceneGeometry()
 {
     std::wstring exeDir = GetExeDir_RS();
 
+    // Sponza
     mSponzaScene.ObjPath = exeDir + L"Models\\sponza.obj";
     mSponzaScene.AssetDir = GetDirPart_RS(mSponzaScene.ObjPath);
     mSponzaScene.UseTessellation = false;
@@ -236,14 +248,14 @@ void RenderingSystem::BuildSceneGeometry()
     }
     mSponzaScene.DrawSubmeshes = mSponzaScene.CpuMesh.Submeshes;
 
+    // Tessellation scene
     mTessScene.ObjPath = exeDir + L"Models\\cylinder.obj";
     mTessScene.AssetDir = GetDirPart_RS(mTessScene.ObjPath);
     mTessScene.UseTessellation = true;
     mTessScene.TessMin = 1.0f;
-    mTessScene.TessMax = 8.0f;
-    mTessScene.TessMaxDistance = 7.0f;
-    mTessScene.DisplacementScale = 0.15f;
-    
+    mTessScene.TessMax = 6.0f;
+    mTessScene.TessMaxDistance = 10.0f;
+    mTessScene.DisplacementScale = 0.3f;
     mTessScene.NormalMapFlipY = 0.0f;
 
     XMStoreFloat4x4(&mTessScene.World,
@@ -256,6 +268,22 @@ void RenderingSystem::BuildSceneGeometry()
         throw std::runtime_error("Tess mesh load failed");
     }
     mTessScene.DrawSubmeshes = mTessScene.CpuMesh.Submeshes;
+
+    // Optimization scene 
+    mOptimizationScene.ObjPath = exeDir + L"Models\\Box of bottles.obj";
+    mOptimizationScene.AssetDir = GetDirPart_RS(mOptimizationScene.ObjPath);
+    mOptimizationScene.UseTessellation = false;
+
+    XMStoreFloat4x4(&mOptimizationScene.World,
+        XMMatrixScaling(0.35f, 0.35f, 0.35f));
+
+    if (!ObjLoader::LoadObjPosNormalTex(mOptimizationScene.ObjPath, mOptimizationScene.CpuMesh, false))
+    {
+        MessageBoxW(nullptr, mOptimizationScene.ObjPath.c_str(), L"OPTIMIZATION OBJ NOT FOUND", MB_OK | MB_ICONERROR);
+        throw std::runtime_error("Optimization mesh load failed");
+    }
+
+    mOptimizationScene.DrawSubmeshes = mOptimizationScene.CpuMesh.Submeshes;
 
     auto buildGpuBuffers = [&](SceneMesh& scene)
         {
@@ -307,6 +335,160 @@ void RenderingSystem::BuildSceneGeometry()
 
     buildGpuBuffers(mSponzaScene);
     buildGpuBuffers(mTessScene);
+    buildGpuBuffers(mOptimizationScene);
+
+    BuildOptimizationSceneObjects();
+    BuildOptimizationOctree();
+}
+
+void RenderingSystem::BuildOptimizationSceneObjects()
+{
+    mOptObjects.clear();
+
+    const int gridX = 100;
+    const int gridZ = 10;
+    const float spacing = 6.0f;
+
+    const float startX = -0.5f * (gridX - 1) * spacing;
+    const float startZ = -0.5f * (gridZ - 1) * spacing;
+
+    std::mt19937 rng(1337u);
+    std::uniform_real_distribution<float> scaleDist(0.8f, 1.5f);
+    std::uniform_real_distribution<float> yawDist(0.0f, XM_2PI);
+    std::uniform_real_distribution<float> jitterDist(-0.7f, 0.7f);
+
+    float minX = FLT_MAX, minY = FLT_MAX, minZ = FLT_MAX;
+    float maxX = -FLT_MAX, maxY = -FLT_MAX, maxZ = -FLT_MAX;
+
+    for (int z = 0; z < gridZ; ++z)
+    {
+        for (int x = 0; x < gridX; ++x)
+        {
+            const float sx = scaleDist(rng);
+            const float sy = scaleDist(rng) * 1.2f;
+            const float sz = scaleDist(rng);
+
+            const float px = startX + x * spacing + jitterDist(rng);
+            const float pz = startZ + z * spacing + jitterDist(rng);
+            const float py = 0.0f;
+
+            const float yaw = yawDist(rng);
+
+            XMMATRIX world =
+                XMMatrixScaling(sx, sy, sz) *
+                XMMatrixRotationY(yaw) *
+                XMMatrixTranslation(px, py, pz);
+
+            SceneObject obj;
+            XMStoreFloat4x4(&obj.World, world);
+
+            const float baseModelRadius = 1.2f;
+            const float r = baseModelRadius * (std::max)((std::max)(sx, sy), sz);
+
+            obj.Bounds.Center = XMFLOAT3(px, py + 1.0f * sy, pz);
+            obj.Bounds.Radius = r;
+
+            mOptObjects.push_back(obj);
+
+            minX = (std::min)(minX, px - r);
+            minY = (std::min)(minY, (py + sy) - r);
+            minZ = (std::min)(minZ, pz - r);
+
+            maxX = (std::max)(maxX, px + r);
+            maxY = (std::max)(maxY, (py + sy) + r);
+            maxZ = (std::max)(maxZ, pz + r);
+        }
+    }
+
+    mOptSceneCenter = XMFLOAT3(
+        0.5f * (minX + maxX),
+        0.5f * (minY + maxY),
+        0.5f * (minZ + maxZ));
+
+    mOptSceneExtents = XMFLOAT3(
+        0.5f * (maxX - minX) + 1.0f,
+        0.5f * (maxY - minY) + 1.0f,
+        0.5f * (maxZ - minZ) + 1.0f);
+
+    mLastTotalCount = (UINT)mOptObjects.size();
+}
+
+void RenderingSystem::BuildOptimizationOctree()
+{
+    std::vector<int> indices;
+    indices.reserve(mOptObjects.size());
+
+    for (int i = 0; i < (int)mOptObjects.size(); ++i)
+        indices.push_back(i);
+
+    mOctreeRoot = BuildOctreeNode(mOptSceneCenter, mOptSceneExtents, indices, 0);
+}
+
+std::unique_ptr<OctreeNode> RenderingSystem::BuildOctreeNode(
+    const XMFLOAT3& center,
+    const XMFLOAT3& extents,
+    const std::vector<int>& objectIndices,
+    int depth)
+{
+    auto node = std::make_unique<OctreeNode>();
+    node->Center = center;
+    node->Extents = extents;
+    node->ObjectIndices = objectIndices;
+    node->IsLeaf = true;
+
+    const int maxDepth = 6;
+    const int maxObjectsPerLeaf = 24;
+
+    if (depth >= maxDepth || (int)objectIndices.size() <= maxObjectsPerLeaf)
+        return node;
+
+    XMFLOAT3 childExtents(extents.x * 0.5f, extents.y * 0.5f, extents.z * 0.5f);
+
+    std::vector<int> childLists[8];
+
+    for (int objIndex : objectIndices)
+    {
+        const BoundingSphere& s = mOptObjects[objIndex].Bounds;
+
+        for (int c = 0; c < 8; ++c)
+        {
+            XMFLOAT3 childCenter = center;
+            childCenter.x += (c & 1) ? childExtents.x : -childExtents.x;
+            childCenter.y += (c & 2) ? childExtents.y : -childExtents.y;
+            childCenter.z += (c & 4) ? childExtents.z : -childExtents.z;
+
+            bool overlapX = std::fabs(s.Center.x - childCenter.x) <= (childExtents.x + s.Radius);
+            bool overlapY = std::fabs(s.Center.y - childCenter.y) <= (childExtents.y + s.Radius);
+            bool overlapZ = std::fabs(s.Center.z - childCenter.z) <= (childExtents.z + s.Radius);
+
+            if (overlapX && overlapY && overlapZ)
+                childLists[c].push_back(objIndex);
+        }
+    }
+
+    bool anySplit = false;
+    for (int c = 0; c < 8; ++c)
+    {
+        if (childLists[c].empty())
+            continue;
+
+        if ((int)childLists[c].size() == (int)objectIndices.size())
+            continue;
+
+        anySplit = true;
+
+        XMFLOAT3 childCenter = center;
+        childCenter.x += (c & 1) ? childExtents.x : -childExtents.x;
+        childCenter.y += (c & 2) ? childExtents.y : -childExtents.y;
+        childCenter.z += (c & 4) ? childExtents.z : -childExtents.z;
+
+        node->Children[c] = BuildOctreeNode(childCenter, childExtents, childLists[c], depth + 1);
+    }
+
+    if (anySplit)
+        node->IsLeaf = false;
+
+    return node;
 }
 
 void RenderingSystem::BuildSceneTextures()
@@ -339,13 +521,9 @@ void RenderingSystem::BuildSceneTextures()
             mTextureUploads.push_back(nullptr);
 
             if (!path.empty() && FileExists_RS(path))
-            {
                 LoadTexture_WIC(path, mTextures.back(), mTextureUploads.back());
-            }
             else
-            {
                 CreateSolidTextureRGBA(solidRGBAIfMissing, mTextures.back(), mTextureUploads.back());
-            }
 
             return idx;
         };
@@ -411,21 +589,41 @@ void RenderingSystem::BuildSceneTextures()
 
                 UINT base = (UINT)mTextures.size();
 
-                addTex(diff, 0xFFFFFFFFu);   
-                addTex(norm, 0xFF8080FFu);   
-                addTex(disp, 0xFF000000u);   
+                addTex(diff, 0xFFFFFFFFu);   // white
+                addTex(norm, 0xFF8080FFu);   // flat normal
+                addTex(disp, 0xFF000000u);   // black height
 
                 scene.SubmeshBaseSrv.push_back(base);
             }
         };
 
+    
     buildSceneMaterialSrvs(mSponzaScene);
     buildSceneMaterialSrvs(mTessScene);
+
+    
+    {
+        mOptimizationScene.SubmeshBaseSrv.clear();
+        mOptimizationScene.SubmeshBaseSrv.reserve(mOptimizationScene.DrawSubmeshes.size());
+
+        std::wstring diff = mOptimizationScene.AssetDir + L"Diffuse.jpg";
+        std::wstring norm = mOptimizationScene.AssetDir + L"Normal.jpg";
+
+        for (size_t i = 0; i < mOptimizationScene.DrawSubmeshes.size(); ++i)
+        {
+            UINT base = (UINT)mTextures.size();
+
+            addTex(diff, 0xFFFFFFFFu);   // diffuse
+            addTex(norm, 0xFF8080FFu);   // normal
+            addTex(L"", 0xFF000000u);    
+
+            mOptimizationScene.SubmeshBaseSrv.push_back(base);
+        }
+    }
 
     mModelTextureCount = (UINT)mTextures.size();
     mGBufferSrvStartIndex = mModelTextureCount;
 }
-
 void RenderingSystem::BuildDescriptorHeaps()
 {
     const UINT extra = 10;
@@ -458,17 +656,39 @@ void RenderingSystem::BuildDescriptorHeaps()
 
 void RenderingSystem::BuildConstantBuffers()
 {
-    UINT geomSize = AlignCB_RS(sizeof(GeometryConstants));
+    mGeometryCBByteSize = AlignCB_RS(sizeof(GeometryConstants));
+
     UINT lightSize = AlignCB_RS(sizeof(LightConstants));
 
     CD3DX12_HEAP_PROPERTIES uploadHeapProps(D3D12_HEAP_TYPE_UPLOAD);
-    D3D12_RESOURCE_DESC geomCbDesc = CD3DX12_RESOURCE_DESC::Buffer(geomSize);
-    D3D12_RESOURCE_DESC lightCbDesc = CD3DX12_RESOURCE_DESC::Buffer(lightSize);
 
-    ThrowIfFailed(mDevice->CreateCommittedResource(&uploadHeapProps, D3D12_HEAP_FLAG_NONE, &geomCbDesc,
-        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&mGeometryCB)));
-    ThrowIfFailed(mDevice->CreateCommittedResource(&uploadHeapProps, D3D12_HEAP_FLAG_NONE, &lightCbDesc,
-        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&mLightingCB)));
+    D3D12_RESOURCE_DESC geomCbDesc = CD3DX12_RESOURCE_DESC::Buffer(mGeometryCBByteSize);
+    ThrowIfFailed(mDevice->CreateCommittedResource(
+        &uploadHeapProps,
+        D3D12_HEAP_FLAG_NONE,
+        &geomCbDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ,
+        nullptr,
+        IID_PPV_ARGS(&mGeometryCB)));
+
+    UINT64 optCbSize = (UINT64)mGeometryCBByteSize * (UINT64)(mOptObjects.empty() ? 1 : mOptObjects.size());
+    D3D12_RESOURCE_DESC optGeomCbDesc = CD3DX12_RESOURCE_DESC::Buffer(optCbSize);
+    ThrowIfFailed(mDevice->CreateCommittedResource(
+        &uploadHeapProps,
+        D3D12_HEAP_FLAG_NONE,
+        &optGeomCbDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ,
+        nullptr,
+        IID_PPV_ARGS(&mOptimizationGeometryCB)));
+
+    D3D12_RESOURCE_DESC lightCbDesc = CD3DX12_RESOURCE_DESC::Buffer(lightSize);
+    ThrowIfFailed(mDevice->CreateCommittedResource(
+        &uploadHeapProps,
+        D3D12_HEAP_FLAG_NONE,
+        &lightCbDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ,
+        nullptr,
+        IID_PPV_ARGS(&mLightingCB)));
 }
 
 void RenderingSystem::BuildRootSignatures()
@@ -747,9 +967,31 @@ void RenderingSystem::CreateTextureSrv(UINT srvIndex, ID3D12Resource* tex)
     mDevice->CreateShaderResourceView(tex, &srvDesc, hCpu);
 }
 
+XMMATRIX RenderingSystem::GetViewMatrix() const
+{
+    XMVECTOR pos = XMLoadFloat3(&mCameraPos);
+    XMVECTOR forward = XMVectorSet(
+        cosf(mPitch) * sinf(mYaw),
+        sinf(mPitch),
+        cosf(mPitch) * cosf(mYaw),
+        0.0f);
+
+    return XMMatrixLookAtLH(pos, pos + forward, XMVectorSet(0, 1, 0, 0));
+}
+
+XMMATRIX RenderingSystem::GetProjMatrix() const
+{
+    return XMLoadFloat4x4(&mProj);
+}
+
+XMMATRIX RenderingSystem::GetViewProjMatrix() const
+{
+    return GetViewMatrix() * GetProjMatrix();
+}
+
 void RenderingSystem::UpdateCamera(const InputDevice& input, float dt)
 {
-    const float moveSpeed = 6.0f;
+    const float moveSpeed = 10.0f;
     const float mouseSens = 0.0025f;
 
     if (input.IsMouseDown(1))
@@ -777,12 +1019,17 @@ void RenderingSystem::UpdateCamera(const InputDevice& input, float dt)
     if (input.IsKeyDown('S')) pos -= forward * moveSpeed * dt;
     if (input.IsKeyDown('A')) pos -= right * moveSpeed * dt;
     if (input.IsKeyDown('D')) pos += right * moveSpeed * dt;
+    if (input.IsKeyDown('Q')) pos += up * moveSpeed * dt;
+    if (input.IsKeyDown('E')) pos -= up * moveSpeed * dt;
 
     XMStoreFloat3(&mCameraPos, pos);
 }
 
 void RenderingSystem::UpdateObjectRotation(const InputDevice& input)
 {
+    if (mMode != RenderMode::Tessellation)
+        return;
+
     if (input.IsMouseDown(0))
     {
         const float rotSpeed = 0.01f;
@@ -804,16 +1051,12 @@ void RenderingSystem::UpdateGeometryCB(const SceneMesh& scene)
         XMMatrixRotationY(mObjectYaw) *
         baseWorld;
 
-    XMVECTOR pos = XMLoadFloat3(&mCameraPos);
-    XMVECTOR forward = XMVectorSet(
-        cosf(mPitch) * sinf(mYaw),
-        sinf(mPitch),
-        cosf(mPitch) * cosf(mYaw),
-        0.0f);
+    UpdateGeometryCBWithWorld(scene, world);
+}
 
-    XMMATRIX view = XMMatrixLookAtLH(pos, pos + forward, XMVectorSet(0, 1, 0, 0));
-    XMMATRIX proj = XMLoadFloat4x4(&mProj);
-    XMMATRIX viewProj = view * proj;
+void RenderingSystem::UpdateGeometryCBWithWorld(const SceneMesh& scene, CXMMATRIX world)
+{
+    XMMATRIX viewProj = GetViewProjMatrix();
 
     XMStoreFloat4x4(&mGeometryData.World, XMMatrixTranspose(world));
     XMStoreFloat4x4(&mGeometryData.ViewProj, XMMatrixTranspose(viewProj));
@@ -830,6 +1073,28 @@ void RenderingSystem::UpdateGeometryCB(const SceneMesh& scene)
     ThrowIfFailed(mGeometryCB->Map(0, nullptr, &mapped));
     memcpy(mapped, &mGeometryData, sizeof(GeometryConstants));
     mGeometryCB->Unmap(0, nullptr);
+}
+
+void RenderingSystem::UpdateOptimizationGeometryCB(UINT objectIndex, CXMMATRIX world)
+{
+    XMMATRIX viewProj = GetViewProjMatrix();
+
+    GeometryConstants data = {};
+    XMStoreFloat4x4(&data.World, XMMatrixTranspose(world));
+    XMStoreFloat4x4(&data.ViewProj, XMMatrixTranspose(viewProj));
+    data.Tiling = XMFLOAT2(1.0f, 1.0f);
+    data.UVOffset = XMFLOAT2(0.0f, 0.0f);
+    data.EyePosW = mCameraPos;
+    data.TessMin = mOptimizationScene.TessMin;
+    data.TessMax = mOptimizationScene.TessMax;
+    data.TessMaxDistance = mOptimizationScene.TessMaxDistance;
+    data.DisplacementScale = mOptimizationScene.DisplacementScale;
+    data.NormalMapFlipY = mOptimizationScene.NormalMapFlipY;
+
+    BYTE* mapped = nullptr;
+    ThrowIfFailed(mOptimizationGeometryCB->Map(0, nullptr, reinterpret_cast<void**>(&mapped)));
+    memcpy(mapped + (size_t)objectIndex * mGeometryCBByteSize, &data, sizeof(GeometryConstants));
+    mOptimizationGeometryCB->Unmap(0, nullptr);
 }
 
 void RenderingSystem::UpdateLightCB(float totalTime)
@@ -854,7 +1119,7 @@ void RenderingSystem::UpdateLightCB(float totalTime)
 
     mLightingData.SpotLight.Position = { 0.0f, 10.0f, -5.0f };
     mLightingData.SpotLight.Direction = { 0.0f, -1.0f, 0.3f };
-    mLightingData.SpotLight.Range = 30.0f;
+    mLightingData.SpotLight.Range = 40.0f;
     mLightingData.SpotLight.SpotPower = 24.0f;
     mLightingData.SpotLight.Color = { 0.9f, 1.0f, 0.7f };
     mLightingData.SpotLight.Intensity = 2.0f;
@@ -866,34 +1131,183 @@ void RenderingSystem::UpdateLightCB(float totalTime)
     mLightingCB->Unmap(0, nullptr);
 }
 
-void RenderingSystem::Update(float totalTime, float deltaTime, const InputDevice& input)
+void RenderingSystem::ResetCameraForMode(RenderMode mode)
 {
-    if (input.IsKeyDown('1'))
+    mObjectYaw = 0.0f;
+    mObjectPitch = 0.0f;
+
+    switch (mode)
     {
-        mMode = RenderMode::Sponza;
+    case RenderMode::Sponza:
         mCameraPos = { 0.0f, 1.5f, -2.0f };
         mYaw = 0.0f;
         mPitch = 0.0f;
-        mObjectYaw = 0.0f;
-        mObjectPitch = 0.0f;
-    }
+        break;
 
-    if (input.IsKeyDown('2'))
-    {
-        mMode = RenderMode::Tessellation;
+    case RenderMode::Tessellation:
         mCameraPos = { 0.0f, 0.0f, 0.0f };
         mYaw = 0.0f;
         mPitch = 0.0f;
-        mObjectYaw = 0.0f;
-        mObjectPitch = 0.0f;
+        break;
+
+    case RenderMode::Optimization:
+        mCameraPos = { 0.0f, 8.0f, -25.0f };
+        mYaw = 0.0f;
+        mPitch = 0.05f;
+        break;
     }
+}
+
+std::array<XMFLOAT4, 6> RenderingSystem::ExtractFrustumPlanes(CXMMATRIX viewProj) const
+{
+    XMFLOAT4X4 m;
+    XMStoreFloat4x4(&m, viewProj);
+
+    std::array<XMFLOAT4, 6> p;
+
+    p[0] = XMFLOAT4(m._14 + m._11, m._24 + m._21, m._34 + m._31, m._44 + m._41);
+    p[1] = XMFLOAT4(m._14 - m._11, m._24 - m._21, m._34 - m._31, m._44 - m._41);
+    p[2] = XMFLOAT4(m._14 + m._12, m._24 + m._22, m._34 + m._32, m._44 + m._42);
+    p[3] = XMFLOAT4(m._14 - m._12, m._24 - m._22, m._34 - m._32, m._44 - m._42);
+    p[4] = XMFLOAT4(m._13, m._23, m._33, m._43);
+    p[5] = XMFLOAT4(m._14 - m._13, m._24 - m._23, m._34 - m._33, m._44 - m._43);
+
+    for (auto& plane : p)
+    {
+        float len = sqrtf(plane.x * plane.x + plane.y * plane.y + plane.z * plane.z);
+        if (len > 0.0f)
+        {
+            plane.x /= len;
+            plane.y /= len;
+            plane.z /= len;
+            plane.w /= len;
+        }
+    }
+
+    return p;
+}
+
+bool RenderingSystem::SphereInsideFrustum(const BoundingSphere& sphere, const std::array<XMFLOAT4, 6>& planes) const
+{
+    for (const XMFLOAT4& p : planes)
+    {
+        float d = p.x * sphere.Center.x + p.y * sphere.Center.y + p.z * sphere.Center.z + p.w;
+        if (d < -sphere.Radius)
+            return false;
+    }
+    return true;
+}
+
+bool RenderingSystem::AabbInsideFrustum(
+    const XMFLOAT3& center,
+    const XMFLOAT3& extents,
+    const std::array<XMFLOAT4, 6>& planes) const
+{
+    for (const XMFLOAT4& p : planes)
+    {
+        float r = extents.x * fabsf(p.x) + extents.y * fabsf(p.y) + extents.z * fabsf(p.z);
+        float s = p.x * center.x + p.y * center.y + p.z * center.z + p.w;
+        if (s + r < 0.0f)
+            return false;
+    }
+    return true;
+}
+
+void RenderingSystem::CollectVisibleObjectsLinear(const std::array<XMFLOAT4, 6>& planes, std::vector<int>& outVisible) const
+{
+    outVisible.clear();
+    outVisible.reserve(mOptObjects.size());
+
+    for (int i = 0; i < (int)mOptObjects.size(); ++i)
+    {
+        if (SphereInsideFrustum(mOptObjects[i].Bounds, planes))
+            outVisible.push_back(i);
+    }
+}
+
+void RenderingSystem::CollectVisibleObjectsOctree(
+    const OctreeNode* node,
+    const std::array<XMFLOAT4, 6>& planes,
+    std::vector<int>& outVisible) const
+{
+    if (!node)
+        return;
+
+    if (!AabbInsideFrustum(node->Center, node->Extents, planes))
+        return;
+
+    if (node->IsLeaf)
+    {
+        for (int objIndex : node->ObjectIndices)
+        {
+            if (SphereInsideFrustum(mOptObjects[objIndex].Bounds, planes))
+                outVisible.push_back(objIndex);
+        }
+        return;
+    }
+
+    for (const auto& child : node->Children)
+    {
+        if (child)
+            CollectVisibleObjectsOctree(child.get(), planes, outVisible);
+    }
+}
+
+void RenderingSystem::Update(float totalTime, float deltaTime, const InputDevice& input)
+{
+    if (input.WasKeyPressed('1'))
+    {
+        mMode = RenderMode::Sponza;
+        ResetCameraForMode(mMode);
+    }
+
+    if (input.WasKeyPressed('2'))
+    {
+        mMode = RenderMode::Tessellation;
+        ResetCameraForMode(mMode);
+    }
+
+    if (input.WasKeyPressed('3'))
+    {
+        mMode = RenderMode::Optimization;
+        ResetCameraForMode(mMode);
+    }
+
+    if (input.WasKeyPressed('F'))
+        mEnableFrustumCulling = !mEnableFrustumCulling;
+
+    if (input.WasKeyPressed('O'))
+        mEnableOctree = !mEnableOctree;
 
     UpdateObjectRotation(input);
     UpdateCamera(input, deltaTime);
 
-    const SceneMesh& activeScene = (mMode == RenderMode::Sponza) ? mSponzaScene : mTessScene;
-    UpdateGeometryCB(activeScene);
+    if (mMode == RenderMode::Sponza)
+        UpdateGeometryCB(mSponzaScene);
+    else if (mMode == RenderMode::Tessellation)
+        UpdateGeometryCB(mTessScene);
+
     UpdateLightCB(totalTime);
+
+    mStatsPrintTimer += deltaTime;
+    if (mStatsPrintTimer >= 1.0f)
+    {
+        mStatsPrintTimer = 0.0f;
+
+        std::ostringstream oss;
+        oss << "[DX12 OPT] mode=";
+        if (mMode == RenderMode::Sponza) oss << "Sponza";
+        else if (mMode == RenderMode::Tessellation) oss << "Tessellation";
+        else oss << "Optimization";
+
+        oss << " | frustum=" << (mEnableFrustumCulling ? "ON" : "OFF")
+            << " | octree=" << (mEnableOctree ? "ON" : "OFF")
+            << " | visible=" << mLastVisibleCount
+            << " / total=" << mLastTotalCount
+            << "\n";
+
+        OutputDebugStringA(oss.str().c_str());
+    }
 }
 
 void RenderingSystem::DrawSceneGeometryPass(
@@ -941,6 +1355,81 @@ void RenderingSystem::DrawSceneGeometryPass(
     mGBuffer.TransitionToShaderResource(cmdList);
 }
 
+void RenderingSystem::DrawOptimizationGeometryPass(
+    ID3D12GraphicsCommandList* cmdList,
+    D3D12_CPU_DESCRIPTOR_HANDLE depthDsv)
+{
+    mGBuffer.TransitionToRenderTarget(cmdList);
+    mGBuffer.Clear(cmdList);
+
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvs[3] =
+    {
+        mGBuffer.GetAlbedoRtv(),
+        mGBuffer.GetNormalRtv(),
+        mGBuffer.GetPositionRtv()
+    };
+
+    cmdList->OMSetRenderTargets(3, rtvs, TRUE, &depthDsv);
+    cmdList->SetPipelineState(mGeometryPSO.Get());
+    cmdList->SetGraphicsRootSignature(mGeometryRootSig.Get());
+    cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    cmdList->IASetVertexBuffers(0, 1, &mOptimizationScene.VBV);
+    cmdList->IASetIndexBuffer(&mOptimizationScene.IBV);
+
+    ID3D12DescriptorHeap* heaps[] = { mSrvHeap.Get() };
+    cmdList->SetDescriptorHeaps(1, heaps);
+
+    std::vector<int> visibleObjects;
+    mLastTotalCount = (UINT)mOptObjects.size();
+
+    if (!mEnableFrustumCulling)
+    {
+        visibleObjects.reserve(mOptObjects.size());
+        for (int i = 0; i < (int)mOptObjects.size(); ++i)
+            visibleObjects.push_back(i);
+    }
+    else
+    {
+        auto planes = ExtractFrustumPlanes(GetViewProjMatrix());
+
+        if (mEnableOctree && mOctreeRoot)
+            CollectVisibleObjectsOctree(mOctreeRoot.get(), planes, visibleObjects);
+        else
+            CollectVisibleObjectsLinear(planes, visibleObjects);
+    }
+
+    std::sort(visibleObjects.begin(), visibleObjects.end());
+    visibleObjects.erase(std::unique(visibleObjects.begin(), visibleObjects.end()), visibleObjects.end());
+
+    mLastVisibleCount = (UINT)visibleObjects.size();
+
+    CD3DX12_GPU_DESCRIPTOR_HANDLE srvHeapStart(mSrvHeap->GetGPUDescriptorHandleForHeapStart());
+
+    for (int objIndex : visibleObjects)
+    {
+        XMMATRIX world = XMLoadFloat4x4(&mOptObjects[objIndex].World);
+        UpdateOptimizationGeometryCB((UINT)objIndex, world);
+
+        D3D12_GPU_VIRTUAL_ADDRESS gpuAddr =
+            mOptimizationGeometryCB->GetGPUVirtualAddress() + (UINT64)objIndex * (UINT64)mGeometryCBByteSize;
+
+        cmdList->SetGraphicsRootConstantBufferView(0, gpuAddr);
+
+        for (size_t smIndex = 0; smIndex < mOptimizationScene.DrawSubmeshes.size(); ++smIndex)
+        {
+            UINT baseSrv = (smIndex < mOptimizationScene.SubmeshBaseSrv.size()) ? mOptimizationScene.SubmeshBaseSrv[smIndex] : 0;
+            CD3DX12_GPU_DESCRIPTOR_HANDLE handle = srvHeapStart;
+            handle.Offset((INT)baseSrv, mCbvSrvUavDescriptorSize);
+            cmdList->SetGraphicsRootDescriptorTable(1, handle);
+
+            const ObjSubmesh& sm = mOptimizationScene.DrawSubmeshes[smIndex];
+            cmdList->DrawIndexedInstanced(sm.IndexCount, 1, sm.StartIndex, 0, 0);
+        }
+    }
+
+    mGBuffer.TransitionToShaderResource(cmdList);
+}
+
 void RenderingSystem::DrawLightingPass(ID3D12GraphicsCommandList* cmdList, D3D12_CPU_DESCRIPTOR_HANDLE backBufferRtv)
 {
     FLOAT clearColor[] = { 0.07f, 0.07f, 0.09f, 1.0f };
@@ -970,7 +1459,20 @@ void RenderingSystem::Draw(
     ID3D12DescriptorHeap* heaps[] = { mSrvHeap.Get() };
     cmdList->SetDescriptorHeaps(1, heaps);
 
-    const SceneMesh& activeScene = (mMode == RenderMode::Sponza) ? mSponzaScene : mTessScene;
-    DrawSceneGeometryPass(cmdList, activeScene, depthDsv);
+    switch (mMode)
+    {
+    case RenderMode::Sponza:
+        DrawSceneGeometryPass(cmdList, mSponzaScene, depthDsv);
+        break;
+
+    case RenderMode::Tessellation:
+        DrawSceneGeometryPass(cmdList, mTessScene, depthDsv);
+        break;
+
+    case RenderMode::Optimization:
+        DrawOptimizationGeometryPass(cmdList, depthDsv);
+        break;
+    }
+
     DrawLightingPass(cmdList, backBufferRtv);
 }

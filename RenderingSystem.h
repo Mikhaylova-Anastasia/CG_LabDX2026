@@ -4,6 +4,9 @@
 #include "ObjLoader.h"
 #include "GBuffer.h"
 #include <unordered_map>
+#include <array>
+#include <memory>
+#include <vector>
 
 struct GeometryConstants
 {
@@ -66,7 +69,8 @@ struct LightConstants
 enum class RenderMode
 {
     Sponza = 0,
-    Tessellation = 1
+    Tessellation = 1,
+    Optimization = 2
 };
 
 struct SceneMesh
@@ -78,10 +82,10 @@ struct SceneMesh
     std::vector<ObjSubmesh> DrawSubmeshes;
     std::vector<UINT> SubmeshBaseSrv;
 
-    ComPtr<ID3D12Resource> VertexBuffer;
-    ComPtr<ID3D12Resource> IndexBuffer;
-    ComPtr<ID3D12Resource> VBUpload;
-    ComPtr<ID3D12Resource> IBUpload;
+    Microsoft::WRL::ComPtr<ID3D12Resource> VertexBuffer;
+    Microsoft::WRL::ComPtr<ID3D12Resource> IndexBuffer;
+    Microsoft::WRL::ComPtr<ID3D12Resource> VBUpload;
+    Microsoft::WRL::ComPtr<ID3D12Resource> IBUpload;
 
     D3D12_VERTEX_BUFFER_VIEW VBV = {};
     D3D12_INDEX_BUFFER_VIEW  IBV = {};
@@ -94,6 +98,28 @@ struct SceneMesh
     float TessMaxDistance = 8.0f;
     float DisplacementScale = 0.05f;
     float NormalMapFlipY = 0.0f;
+};
+
+struct BoundingSphere
+{
+    DirectX::XMFLOAT3 Center = { 0.0f, 0.0f, 0.0f };
+    float Radius = 1.0f;
+};
+
+struct SceneObject
+{
+    DirectX::XMFLOAT4X4 World{};
+    BoundingSphere Bounds{};
+};
+
+struct OctreeNode
+{
+    DirectX::XMFLOAT3 Center = { 0.0f, 0.0f, 0.0f };
+    DirectX::XMFLOAT3 Extents = { 1.0f, 1.0f, 1.0f };
+
+    std::vector<int> ObjectIndices;
+    std::array<std::unique_ptr<OctreeNode>, 8> Children{};
+    bool IsLeaf = true;
 };
 
 class RenderingSystem
@@ -125,18 +151,20 @@ private:
     void BuildPSOs();
 
     void LoadTexture_WIC(const std::wstring& filePath,
-        ComPtr<ID3D12Resource>& tex,
-        ComPtr<ID3D12Resource>& upload);
+        Microsoft::WRL::ComPtr<ID3D12Resource>& tex,
+        Microsoft::WRL::ComPtr<ID3D12Resource>& upload);
 
     void CreateSolidTextureRGBA(UINT rgba,
-        ComPtr<ID3D12Resource>& tex,
-        ComPtr<ID3D12Resource>& upload);
+        Microsoft::WRL::ComPtr<ID3D12Resource>& tex,
+        Microsoft::WRL::ComPtr<ID3D12Resource>& upload);
 
     void CreateTextureSrv(UINT srvIndex, ID3D12Resource* tex);
 
     void UpdateCamera(const InputDevice& input, float dt);
     void UpdateObjectRotation(const InputDevice& input);
     void UpdateGeometryCB(const SceneMesh& scene);
+    void UpdateGeometryCBWithWorld(const SceneMesh& scene, DirectX::CXMMATRIX world);
+    void UpdateOptimizationGeometryCB(UINT objectIndex, DirectX::CXMMATRIX world);
     void UpdateLightCB(float totalTime);
 
     void DrawSceneGeometryPass(
@@ -144,7 +172,39 @@ private:
         const SceneMesh& scene,
         D3D12_CPU_DESCRIPTOR_HANDLE depthDsv);
 
+    void DrawOptimizationGeometryPass(
+        ID3D12GraphicsCommandList* cmdList,
+        D3D12_CPU_DESCRIPTOR_HANDLE depthDsv);
+
     void DrawLightingPass(ID3D12GraphicsCommandList* cmdList, D3D12_CPU_DESCRIPTOR_HANDLE backBufferRtv);
+
+private:
+    void ResetCameraForMode(RenderMode mode);
+
+    DirectX::XMMATRIX GetViewMatrix() const;
+    DirectX::XMMATRIX GetProjMatrix() const;
+    DirectX::XMMATRIX GetViewProjMatrix() const;
+
+    void BuildOptimizationSceneObjects();
+    void BuildOptimizationOctree();
+    std::unique_ptr<OctreeNode> BuildOctreeNode(
+        const DirectX::XMFLOAT3& center,
+        const DirectX::XMFLOAT3& extents,
+        const std::vector<int>& objectIndices,
+        int depth);
+
+    std::array<DirectX::XMFLOAT4, 6> ExtractFrustumPlanes(DirectX::CXMMATRIX viewProj) const;
+    bool SphereInsideFrustum(const BoundingSphere& sphere, const std::array<DirectX::XMFLOAT4, 6>& planes) const;
+    bool AabbInsideFrustum(
+        const DirectX::XMFLOAT3& center,
+        const DirectX::XMFLOAT3& extents,
+        const std::array<DirectX::XMFLOAT4, 6>& planes) const;
+
+    void CollectVisibleObjectsLinear(const std::array<DirectX::XMFLOAT4, 6>& planes, std::vector<int>& outVisible) const;
+    void CollectVisibleObjectsOctree(
+        const OctreeNode* node,
+        const std::array<DirectX::XMFLOAT4, 6>& planes,
+        std::vector<int>& outVisible) const;
 
 private:
     ID3D12Device* mDevice = nullptr;
@@ -157,28 +217,33 @@ private:
 
     GBuffer mGBuffer;
 
-    ComPtr<ID3D12DescriptorHeap> mSrvHeap;
-    ComPtr<ID3D12DescriptorHeap> mGBufferRtvHeap;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> mSrvHeap;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> mGBufferRtvHeap;
 
-    ComPtr<ID3D12RootSignature> mGeometryRootSig;
-    ComPtr<ID3D12RootSignature> mLightingRootSig;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> mGeometryRootSig;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> mLightingRootSig;
 
-    ComPtr<ID3D12PipelineState> mGeometryPSO;
-    ComPtr<ID3D12PipelineState> mTessPSO;
-    ComPtr<ID3D12PipelineState> mLightingPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> mGeometryPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> mTessPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> mLightingPSO;
 
     SceneMesh mSponzaScene;
     SceneMesh mTessScene;
+    SceneMesh mOptimizationScene;
+
     RenderMode mMode = RenderMode::Sponza;
 
-    std::vector<ComPtr<ID3D12Resource>> mTextures;
-    std::vector<ComPtr<ID3D12Resource>> mTextureUploads;
+    std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> mTextures;
+    std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> mTextureUploads;
 
     UINT mModelTextureCount = 0;
     UINT mGBufferSrvStartIndex = 0;
 
-    ComPtr<ID3D12Resource> mGeometryCB;
-    ComPtr<ID3D12Resource> mLightingCB;
+    Microsoft::WRL::ComPtr<ID3D12Resource> mGeometryCB;
+    Microsoft::WRL::ComPtr<ID3D12Resource> mOptimizationGeometryCB;
+    UINT mGeometryCBByteSize = 0;
+
+    Microsoft::WRL::ComPtr<ID3D12Resource> mLightingCB;
 
     GeometryConstants mGeometryData{};
     LightConstants mLightingData{};
@@ -190,4 +255,16 @@ private:
 
     float mObjectYaw = 0.0f;
     float mObjectPitch = 0.0f;
+
+    std::vector<SceneObject> mOptObjects;
+    std::unique_ptr<OctreeNode> mOctreeRoot;
+    DirectX::XMFLOAT3 mOptSceneCenter = { 0.0f, 0.0f, 0.0f };
+    DirectX::XMFLOAT3 mOptSceneExtents = { 60.0f, 10.0f, 60.0f };
+
+    bool mEnableFrustumCulling = true;
+    bool mEnableOctree = true;
+
+    UINT mLastVisibleCount = 0;
+    UINT mLastTotalCount = 0;
+    float mStatsPrintTimer = 0.0f;
 };
