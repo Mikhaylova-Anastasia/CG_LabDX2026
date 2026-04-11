@@ -269,7 +269,7 @@ void RenderingSystem::BuildSceneGeometry()
     }
     mTessScene.DrawSubmeshes = mTessScene.CpuMesh.Submeshes;
 
-    // Optimization scene 
+    // Optimization scene with real OBJ
     mOptimizationScene.ObjPath = exeDir + L"Models\\Box of bottles.obj";
     mOptimizationScene.AssetDir = GetDirPart_RS(mOptimizationScene.ObjPath);
     mOptimizationScene.UseTessellation = false;
@@ -345,8 +345,8 @@ void RenderingSystem::BuildOptimizationSceneObjects()
 {
     mOptObjects.clear();
 
-    const int gridX = 100;
-    const int gridZ = 10;
+    const int gridX = 16;
+    const int gridZ = 16;
     const float spacing = 6.0f;
 
     const float startX = -0.5f * (gridX - 1) * spacing;
@@ -356,6 +356,10 @@ void RenderingSystem::BuildOptimizationSceneObjects()
     std::uniform_real_distribution<float> scaleDist(0.8f, 1.5f);
     std::uniform_real_distribution<float> yawDist(0.0f, XM_2PI);
     std::uniform_real_distribution<float> jitterDist(-0.7f, 0.7f);
+    std::uniform_real_distribution<float> bobAmpDist(0.12f, 0.35f);
+    std::uniform_real_distribution<float> bobSpeedDist(0.8f, 1.6f);
+    std::uniform_real_distribution<float> rotSpeedDist(0.25f, 0.9f);
+    std::uniform_real_distribution<float> phaseDist(0.0f, XM_2PI);
 
     float minX = FLT_MAX, minY = FLT_MAX, minZ = FLT_MAX;
     float maxX = -FLT_MAX, maxY = -FLT_MAX, maxZ = -FLT_MAX;
@@ -372,31 +376,31 @@ void RenderingSystem::BuildOptimizationSceneObjects()
             const float pz = startZ + z * spacing + jitterDist(rng);
             const float py = 0.0f;
 
-            const float yaw = yawDist(rng);
-
-            XMMATRIX world =
-                XMMatrixScaling(sx, sy, sz) *
-                XMMatrixRotationY(yaw) *
-                XMMatrixTranslation(px, py, pz);
-
             SceneObject obj;
-            XMStoreFloat4x4(&obj.World, world);
+            obj.BasePosition = XMFLOAT3(px, py, pz);
+            obj.Scale = XMFLOAT3(sx, sy, sz);
+            obj.BaseYaw = yawDist(rng);
+            obj.AnimationTime = 0.0f;
+            obj.AnimationAccumulatedDt = 0.0f;
+            obj.BobAmplitude = bobAmpDist(rng);
+            obj.BobSpeed = bobSpeedDist(rng);
+            obj.RotationSpeed = rotSpeedDist(rng);
+            obj.AnimationPhase = phaseDist(rng);
+            obj.UpdateRate = 1;
+            obj.FrameCounter = (x + z) & 3;
 
-            const float baseModelRadius = 1.2f;
-            const float r = baseModelRadius * (std::max)((std::max)(sx, sy), sz);
-
-            obj.Bounds.Center = XMFLOAT3(px, py + 1.0f * sy, pz);
-            obj.Bounds.Radius = r;
-
+            RebuildOptimizationObjectWorld(obj);
             mOptObjects.push_back(obj);
 
-            minX = (std::min)(minX, px - r);
-            minY = (std::min)(minY, (py + sy) - r);
-            minZ = (std::min)(minZ, pz - r);
+            const BoundingSphere& bounds = mOptObjects.back().Bounds;
 
-            maxX = (std::max)(maxX, px + r);
-            maxY = (std::max)(maxY, (py + sy) + r);
-            maxZ = (std::max)(maxZ, pz + r);
+            minX = (std::min)(minX, bounds.Center.x - bounds.Radius);
+            minY = (std::min)(minY, bounds.Center.y - bounds.Radius);
+            minZ = (std::min)(minZ, bounds.Center.z - bounds.Radius);
+
+            maxX = (std::max)(maxX, bounds.Center.x + bounds.Radius);
+            maxY = (std::max)(maxY, bounds.Center.y + bounds.Radius);
+            maxZ = (std::max)(maxZ, bounds.Center.z + bounds.Radius);
         }
     }
 
@@ -411,6 +415,71 @@ void RenderingSystem::BuildOptimizationSceneObjects()
         0.5f * (maxZ - minZ) + 1.0f);
 
     mLastTotalCount = (UINT)mOptObjects.size();
+}
+
+int RenderingSystem::GetAnimationUpdateRate(float distanceSq) const
+{
+    const float nearDist = 15.0f;
+    const float midDist = 35.0f;
+    const float farDist = 70.0f;
+
+    if (distanceSq < nearDist * nearDist)
+        return 1;
+
+    if (distanceSq < midDist * midDist)
+        return 8;
+
+    if (distanceSq < farDist * farDist)
+        return 12;
+
+    return 25;
+}
+
+void RenderingSystem::RebuildOptimizationObjectWorld(SceneObject& obj)
+{
+    const float bobOffset = obj.BobAmplitude * sinf(obj.AnimationTime * obj.BobSpeed + obj.AnimationPhase);
+    const float yaw = obj.BaseYaw + obj.AnimationTime * obj.RotationSpeed;
+
+    XMMATRIX world =
+        XMMatrixScaling(obj.Scale.x, obj.Scale.y, obj.Scale.z) *
+        XMMatrixRotationY(yaw) *
+        XMMatrixTranslation(obj.BasePosition.x, obj.BasePosition.y + bobOffset, obj.BasePosition.z);
+
+    XMStoreFloat4x4(&obj.World, world);
+
+    const float baseModelRadius = 1.2f;
+    obj.Bounds.Center = XMFLOAT3(
+        obj.BasePosition.x,
+        obj.BasePosition.y + bobOffset + obj.Scale.y,
+        obj.BasePosition.z);
+    obj.Bounds.Radius = baseModelRadius * (std::max)((std::max)(obj.Scale.x, obj.Scale.y), obj.Scale.z);
+}
+
+void RenderingSystem::UpdateOptimizationSceneAnimation(float deltaTime)
+{
+    mLastAnimatedCount = 0;
+
+    for (SceneObject& obj : mOptObjects)
+    {
+        const float dx = obj.BasePosition.x - mCameraPos.x;
+        const float dy = obj.BasePosition.y - mCameraPos.y;
+        const float dz = obj.BasePosition.z - mCameraPos.z;
+        const float distanceSq = dx * dx + dy * dy + dz * dz;
+
+        obj.UpdateRate = GetAnimationUpdateRate(distanceSq);
+        obj.AnimationAccumulatedDt += deltaTime;
+        obj.FrameCounter++;
+
+        if (obj.FrameCounter < obj.UpdateRate)
+            continue;
+
+        obj.FrameCounter = 0;
+        obj.AnimationTime += obj.AnimationAccumulatedDt;
+        obj.AnimationAccumulatedDt = 0.0f;
+
+        RebuildOptimizationObjectWorld(obj);
+        ++mLastAnimatedCount;
+    }
 }
 
 void RenderingSystem::BuildOptimizationOctree()
@@ -597,11 +666,10 @@ void RenderingSystem::BuildSceneTextures()
             }
         };
 
-    
+ 
     buildSceneMaterialSrvs(mSponzaScene);
     buildSceneMaterialSrvs(mTessScene);
 
-    
     {
         mOptimizationScene.SubmeshBaseSrv.clear();
         mOptimizationScene.SubmeshBaseSrv.reserve(mOptimizationScene.DrawSubmeshes.size());
@@ -615,7 +683,7 @@ void RenderingSystem::BuildSceneTextures()
 
             addTex(diff, 0xFFFFFFFFu);   // diffuse
             addTex(norm, 0xFF8080FFu);   // normal
-            addTex(L"", 0xFF000000u);    
+            addTex(L"", 0xFF000000u);   
 
             mOptimizationScene.SubmeshBaseSrv.push_back(base);
         }
@@ -1282,10 +1350,14 @@ void RenderingSystem::Update(float totalTime, float deltaTime, const InputDevice
     UpdateObjectRotation(input);
     UpdateCamera(input, deltaTime);
 
+    mLastAnimatedCount = 0;
+
     if (mMode == RenderMode::Sponza)
         UpdateGeometryCB(mSponzaScene);
     else if (mMode == RenderMode::Tessellation)
         UpdateGeometryCB(mTessScene);
+    else if (mMode == RenderMode::Optimization)
+        UpdateOptimizationSceneAnimation(deltaTime);
 
     UpdateLightCB(totalTime);
 
@@ -1303,8 +1375,12 @@ void RenderingSystem::Update(float totalTime, float deltaTime, const InputDevice
         oss << " | frustum=" << (mEnableFrustumCulling ? "ON" : "OFF")
             << " | octree=" << (mEnableOctree ? "ON" : "OFF")
             << " | visible=" << mLastVisibleCount
-            << " / total=" << mLastTotalCount
-            << "\n";
+            << " / total=" << mLastTotalCount;
+
+        if (mMode == RenderMode::Optimization)
+            oss << " | animUpdated=" << mLastAnimatedCount;
+
+        oss << "\n";
 
         OutputDebugStringA(oss.str().c_str());
     }

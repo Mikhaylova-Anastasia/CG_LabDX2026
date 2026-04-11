@@ -110,6 +110,20 @@ struct SceneObject
 {
     DirectX::XMFLOAT4X4 World{};
     BoundingSphere Bounds{};
+
+    DirectX::XMFLOAT3 BasePosition = { 0.0f, 0.0f, 0.0f };
+    DirectX::XMFLOAT3 Scale = { 1.0f, 1.0f, 1.0f };
+
+    float BaseYaw = 0.0f;
+    float AnimationTime = 0.0f;
+    float AnimationAccumulatedDt = 0.0f;
+    float BobAmplitude = 0.25f;
+    float BobSpeed = 1.0f;
+    float RotationSpeed = 0.5f;
+    float AnimationPhase = 0.0f;
+
+    int UpdateRate = 1;
+    int FrameCounter = 0;
 };
 
 struct OctreeNode
@@ -186,6 +200,9 @@ private:
     DirectX::XMMATRIX GetViewProjMatrix() const;
 
     void BuildOptimizationSceneObjects();
+    void UpdateOptimizationSceneAnimation(float deltaTime);
+    int GetAnimationUpdateRate(float distanceSq) const;
+    void RebuildOptimizationObjectWorld(SceneObject& obj);
     void BuildOptimizationOctree();
     std::unique_ptr<OctreeNode> BuildOctreeNode(
         const DirectX::XMFLOAT3& center,
@@ -266,5 +283,6 @@ private:
 
     UINT mLastVisibleCount = 0;
     UINT mLastTotalCount = 0;
+    UINT mLastAnimatedCount = 0;
     float mStatsPrintTimer = 0.0f;
 };
