@@ -23,6 +23,7 @@ ParticleSystem::ParticleSystem()
     mConstants.EmitterVelocityAndDeltaTime = XMFLOAT4(0.0f, 4.5f, 0.0f, 0.0f);
     mConstants.SimParams = XMFLOAT4(-9.81f, 0.0f, 1.8f, 0.0f);
     mConstants.Counts = XMUINT4(mMaxParticles, 0, 0, 0);
+    mConstants.WindDirectionAndStrength = XMFLOAT4(1.0f, 0.0f, 0.0f, mWindStrength);
 }
 
 ParticleSystem::~ParticleSystem()
@@ -139,14 +140,14 @@ void ParticleSystem::BuildBuffers()
 
     CD3DX12_CPU_DESCRIPTOR_HANDLE cpu(mSrvHeap->GetCPUDescriptorHandleForHeapStart());
 
-    
+
     mDevice->CreateUnorderedAccessView(
         mParticleBuffers[0].Get(),
         mParticleCounterBuffers[0].Get(),
         &uavDesc,
         cpu);
 
-    
+
     cpu.Offset(1, mSrvDescriptorSize);
     mDevice->CreateUnorderedAccessView(
         mParticleBuffers[1].Get(),
@@ -154,11 +155,11 @@ void ParticleSystem::BuildBuffers()
         &uavDesc,
         cpu);
 
-    
+
     cpu.Offset(1, mSrvDescriptorSize);
     mDevice->CreateShaderResourceView(mParticleBuffers[0].Get(), &srvDesc, cpu);
 
-   
+
     cpu.Offset(1, mSrvDescriptorSize);
 
     cpu.Offset(1, mSrvDescriptorSize);
@@ -168,7 +169,7 @@ void ParticleSystem::BuildBuffers()
         &uavDesc,
         cpu);
 
-    
+
     cpu.Offset(1, mSrvDescriptorSize);
     mDevice->CreateUnorderedAccessView(
         mParticleBuffers[0].Get(),
@@ -176,11 +177,11 @@ void ParticleSystem::BuildBuffers()
         &uavDesc,
         cpu);
 
-   
+
     cpu.Offset(1, mSrvDescriptorSize);
     mDevice->CreateShaderResourceView(mParticleBuffers[1].Get(), &srvDesc, cpu);
 
-    
+
 }
 
 void ParticleSystem::BuildQuadGeometry()
@@ -357,7 +358,7 @@ void ParticleSystem::CompileShaders()
     compile(L"Shaders\\ParticleUpdate.hlsl", "CSMain", "cs_5_0", mUpdateCS);
     compile(L"Shaders\\ParticleEmit.hlsl", "CSMain", "cs_5_0", mEmitCS);
     compile(L"Shaders\\ParticleVS.hlsl", "VSMain", "vs_5_0", mParticleVS);
-    compile(L"C:\\Users\\0\\source\\repos\\DX12\\x64\\Debug\\Shaders\\ParticleGS.hlsl", "GSMain", "gs_5_0", mParticleGS);
+    compile(L"Shaders\\ParticleGS.hlsl", "GSMain", "gs_5_0", mParticleGS);
     compile(L"Shaders\\ParticlePS.hlsl", "PSMain", "ps_5_0", mParticlePS);
 }
 
@@ -541,7 +542,7 @@ void ParticleSystem::RunUpdateComputeShader(ID3D12GraphicsCommandList* cmdList)
     if (mCurrentBufferIndex == 0)
         handle.Offset(0, mSrvDescriptorSize);
     else
-        handle.Offset(4, mSrvDescriptorSize); 
+        handle.Offset(4, mSrvDescriptorSize);
 
     cmdList->SetComputeRootDescriptorTable(1, handle);
     cmdList->Dispatch((mAliveCount + 63) / 64, 1, 1);
@@ -561,9 +562,9 @@ void ParticleSystem::RunEmitComputeShader(ID3D12GraphicsCommandList* cmdList)
 
     CD3DX12_GPU_DESCRIPTOR_HANDLE handle(mSrvHeap->GetGPUDescriptorHandleForHeapStart());
     if (mCurrentBufferIndex == 0)
-        handle.Offset(0, mSrvDescriptorSize); 
+        handle.Offset(0, mSrvDescriptorSize);
     else
-        handle.Offset(4, mSrvDescriptorSize); 
+        handle.Offset(4, mSrvDescriptorSize);
 
     cmdList->SetComputeRootDescriptorTable(1, handle);
     cmdList->Dispatch((mConstants.Counts.y + 63) / 64, 1, 1);
@@ -605,9 +606,64 @@ void ParticleSystem::RenderParticles(
     cmdList->DrawInstanced(drawCount, 1, 0, 0);
 }
 
+void ParticleSystem::SetWind(const XMFLOAT3& direction, float strength)
+{
+    XMVECTOR dir = XMVectorSet(direction.x, direction.y, direction.z, 0.0f);
+
+    if (XMVectorGetX(XMVector3LengthSq(dir)) < 0.0001f)
+        dir = XMVectorSet(1.0f, 0.0f, 0.0f, 0.0f);
+
+    dir = XMVector3Normalize(dir);
+    XMStoreFloat3(&mWindDirection, dir);
+    mWindStrength = (strength < 0.0f) ? 0.0f : strength;
+
+    mConstants.WindDirectionAndStrength = XMFLOAT4(
+        mWindDirection.x,
+        mWindDirection.y,
+        mWindDirection.z,
+        mWindStrength);
+}
+
+void ParticleSystem::SetWindStrength(float strength)
+{
+    SetWind(mWindDirection, strength);
+}
+
+void ParticleSystem::UpdateWindFromKeyboard(float deltaTime)
+{
+    float strength = mWindStrength;
+    XMFLOAT3 direction = mWindDirection;
+
+    const float strengthChangeSpeed = 4.0f;
+    const float directionChangeSpeed = 1.5f;
+
+    if (GetAsyncKeyState(VK_OEM_PLUS) & 0x8000)
+        strength += strengthChangeSpeed * deltaTime;
+    if (GetAsyncKeyState(VK_OEM_MINUS) & 0x8000)
+        strength -= strengthChangeSpeed * deltaTime;
+
+    if (GetAsyncKeyState(VK_LEFT) & 0x8000)
+        direction.x -= directionChangeSpeed * deltaTime;
+    if (GetAsyncKeyState(VK_RIGHT) & 0x8000)
+        direction.x += directionChangeSpeed * deltaTime;
+    if (GetAsyncKeyState(VK_UP) & 0x8000)
+        direction.z += directionChangeSpeed * deltaTime;
+    if (GetAsyncKeyState(VK_DOWN) & 0x8000)
+        direction.z -= directionChangeSpeed * deltaTime;
+
+    if (GetAsyncKeyState('0') & 0x8000)
+    {
+        direction = XMFLOAT3(1.0f, 0.0f, 0.0f);
+        strength = 3.0f;
+    }
+
+    SetWind(direction, strength);
+}
+
 void ParticleSystem::Update(float deltaTime, const XMFLOAT3& emitterPos, const XMFLOAT3& emitterVel)
 {
     FinalizePreviousFrame();
+    UpdateWindFromKeyboard(deltaTime);
 
     mConstants.EmitterPositionAndSpawnRadius = XMFLOAT4(
         emitterPos.x,

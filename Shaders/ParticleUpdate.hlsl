@@ -17,7 +17,8 @@ cbuffer ParticleConstants : register(b0)
     float4 EmitterPositionAndSpawnRadius;
     float4 EmitterVelocityAndDeltaTime;
     float4 SimParams;
-    uint4 Counts; 
+    uint4 Counts;
+    float4 WindDirectionAndStrength;
 };
 
 ConsumeStructuredBuffer<Particle> InputParticles : register(u0);
@@ -42,8 +43,10 @@ void CSMain(uint3 id : SV_DispatchThreadID)
 
     float t = saturate(p.Age / max(p.Lifetime, 0.0001f));
 
+    float3 windVelocity = WindDirectionAndStrength.xyz * WindDirectionAndStrength.w;
+
     p.Velocity.y += gravity * dt;
-    p.Position += p.Velocity * dt;
+    p.Position += (p.Velocity + windVelocity) * dt;
     p.Color = lerp(p.StartColor, p.EndColor, t);
     p.Size = lerp(0.22f, 0.05f, t);
     p.Active = 1;

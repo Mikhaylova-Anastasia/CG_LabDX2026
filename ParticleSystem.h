@@ -23,10 +23,11 @@ struct Particle
 
 struct ParticleConstants
 {
-    DirectX::XMFLOAT4 EmitterPositionAndSpawnRadius; 
-    DirectX::XMFLOAT4 EmitterVelocityAndDeltaTime;   
-    DirectX::XMFLOAT4 SimParams;                     
-    DirectX::XMUINT4 Counts;                       
+    DirectX::XMFLOAT4 EmitterPositionAndSpawnRadius;
+    DirectX::XMFLOAT4 EmitterVelocityAndDeltaTime;
+    DirectX::XMFLOAT4 SimParams;
+    DirectX::XMUINT4 Counts;
+    DirectX::XMFLOAT4 WindDirectionAndStrength; // xyz = direction, w = strength
 };
 
 class ParticleSystem
@@ -52,6 +53,10 @@ public:
     void OnResize(UINT width, UINT height);
     void BuildResources();
 
+    void SetWind(const DirectX::XMFLOAT3& direction, float strength);
+    void SetWindStrength(float strength);
+    float GetWindStrength() const { return mWindStrength; }
+
 private:
     struct QuadVertex
     {
@@ -66,6 +71,7 @@ private:
     void BuildPSOs();
     void CompileShaders();
     void CreateParticleTexture();
+    void UpdateWindFromKeyboard(float deltaTime);
 
     void ResetCounter(
         ID3D12GraphicsCommandList* cmdList,
@@ -91,7 +97,7 @@ private:
     UINT mSrvDescriptorSize = 0;
     UINT mRtvDescriptorSize = 0;
 
-  
+
     Microsoft::WRL::ComPtr<ID3D12Resource> mParticleBuffers[2];
     Microsoft::WRL::ComPtr<ID3D12Resource> mParticleCounterBuffers[2];
 
@@ -129,6 +135,9 @@ private:
 
     float mSpawnRate = 500.0f;
     float mSpawnAccumulator = 0.0f;
+
+    DirectX::XMFLOAT3 mWindDirection = DirectX::XMFLOAT3(1.0f, 0.0f, 0.0f);
+    float mWindStrength = 3.0f;
 
     std::mt19937 mRng;
     std::uniform_real_distribution<float> mDist;
