@@ -53,6 +53,8 @@ struct SpotLightGPU
     float Intensity = 1.0f;
 };
 
+static const UINT ShadowCascadeCount = 4;
+
 struct LightConstants
 {
     DirectX::XMFLOAT3 EyePosW;
@@ -64,13 +66,20 @@ struct LightConstants
 
     DirectX::XMFLOAT3 AmbientColor;
     float pad1 = 0.0f;
-};
 
+    DirectX::XMFLOAT4 CameraForward;
+
+    DirectX::XMFLOAT4X4 ShadowViewProj[ShadowCascadeCount];
+    DirectX::XMFLOAT4 CascadeSplits;
+    DirectX::XMFLOAT2 ShadowMapSize;
+    DirectX::XMFLOAT2 pad2;
+};
 enum class RenderMode
 {
     Sponza = 0,
     Tessellation = 1,
-    Optimization = 2
+    Optimization = 2,
+    ShadowTest = 3
 };
 
 struct SceneMesh
@@ -163,6 +172,7 @@ private:
     void BuildConstantBuffers();
     void BuildRootSignatures();
     void BuildPSOs();
+    void BuildShadowResources();
 
     void LoadTexture_WIC(const std::wstring& filePath,
         Microsoft::WRL::ComPtr<ID3D12Resource>& tex,
@@ -173,6 +183,7 @@ private:
         Microsoft::WRL::ComPtr<ID3D12Resource>& upload);
 
     void CreateTextureSrv(UINT srvIndex, ID3D12Resource* tex);
+    void CreateShadowTextureArraySrv(UINT srvIndex);
 
     void UpdateCamera(const InputDevice& input, float dt);
     void UpdateObjectRotation(const InputDevice& input);
@@ -180,6 +191,8 @@ private:
     void UpdateGeometryCBWithWorld(const SceneMesh& scene, DirectX::CXMMATRIX world);
     void UpdateOptimizationGeometryCB(UINT objectIndex, DirectX::CXMMATRIX world);
     void UpdateLightCB(float totalTime);
+    void UpdateShadowCascades();
+    void UpdateShadowGeometryCB(DirectX::CXMMATRIX world, DirectX::CXMMATRIX lightViewProj);
 
     void DrawSceneGeometryPass(
         ID3D12GraphicsCommandList* cmdList,
@@ -190,15 +203,24 @@ private:
         ID3D12GraphicsCommandList* cmdList,
         D3D12_CPU_DESCRIPTOR_HANDLE depthDsv);
 
+    void DrawShadowPass(ID3D12GraphicsCommandList* cmdList);
+    void DrawSceneIntoShadowMap(ID3D12GraphicsCommandList* cmdList, const SceneMesh& scene, DirectX::CXMMATRIX lightViewProj);
+    void DrawOptimizationIntoShadowMap(ID3D12GraphicsCommandList* cmdList, DirectX::CXMMATRIX lightViewProj);
     void DrawLightingPass(ID3D12GraphicsCommandList* cmdList, D3D12_CPU_DESCRIPTOR_HANDLE backBufferRtv);
 
 private:
     void ResetCameraForMode(RenderMode mode);
 
+public:
+    // These getters are used by CubeApp.cpp for particles.
+    // They do not change the camera logic or controls.
     DirectX::XMMATRIX GetViewMatrix() const;
     DirectX::XMMATRIX GetProjMatrix() const;
     DirectX::XMMATRIX GetViewProjMatrix() const;
+    DirectX::XMFLOAT4X4 GetViewProjFloat4x4() const;
+    DirectX::XMFLOAT3 GetCameraPosition() const;
 
+private:
     void BuildOptimizationSceneObjects();
     void UpdateOptimizationSceneAnimation(float deltaTime);
     int GetAnimationUpdateRate(float distanceSq) const;
@@ -239,14 +261,17 @@ private:
 
     Microsoft::WRL::ComPtr<ID3D12RootSignature> mGeometryRootSig;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> mLightingRootSig;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> mShadowRootSig;
 
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mGeometryPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mTessPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mLightingPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> mShadowPSO;
 
     SceneMesh mSponzaScene;
     SceneMesh mTessScene;
     SceneMesh mOptimizationScene;
+    SceneMesh mShadowTestScene;
 
     RenderMode mMode = RenderMode::Sponza;
 
@@ -255,12 +280,22 @@ private:
 
     UINT mModelTextureCount = 0;
     UINT mGBufferSrvStartIndex = 0;
+    UINT mShadowSrvIndex = 0;
 
     Microsoft::WRL::ComPtr<ID3D12Resource> mGeometryCB;
+    Microsoft::WRL::ComPtr<ID3D12Resource> mShadowGeometryCB;
     Microsoft::WRL::ComPtr<ID3D12Resource> mOptimizationGeometryCB;
     UINT mGeometryCBByteSize = 0;
 
     Microsoft::WRL::ComPtr<ID3D12Resource> mLightingCB;
+
+    Microsoft::WRL::ComPtr<ID3D12Resource> mShadowMap;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> mShadowDsvHeap;
+    UINT mShadowMapSize = 2048;
+    D3D12_VIEWPORT mShadowViewport{};
+    D3D12_RECT mShadowScissor{};
+    DirectX::XMFLOAT4X4 mShadowViewProj[ShadowCascadeCount]{};
+    float mCascadeSplits[ShadowCascadeCount]{};
 
     GeometryConstants mGeometryData{};
     LightConstants mLightingData{};
