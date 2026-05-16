@@ -1,9 +1,11 @@
+
 #define DEBUG_CASCADES 0
 
 Texture2D gAlbedoTex : register(t0);
 Texture2D gNormalTex : register(t1);
 Texture2D gPositionTex : register(t2);
 Texture2DArray gShadowMap : register(t3);
+Texture2D gShadowMaskTex : register(t4); 
 
 SamplerState gSam : register(s0);
 SamplerComparisonState gShadowSam : register(s1);
@@ -124,7 +126,7 @@ float CalcShadowFactor(float3 posW, float3 normalW)
     float3 lightDir = SafeNormalize(-gDirLight.Direction);
     float ndotl = saturate(dot(normalW, lightDir));
 
-    float bias = max(0.006f * (1.0f - ndotl), 0.0025f);
+    float bias = max(0.018f * (1.0f - ndotl), 0.006f);
     float compareDepth = currentDepth - bias;
 
     float shadowSum = 0.0f;
@@ -147,14 +149,25 @@ float CalcShadowFactor(float3 posW, float3 normalW)
     return shadowSum / 9.0f;
 }
 
-float3 CalcDirectionalLight(float3 albedo, float3 normalW, float3 posW)
+float3 CalcDirectionalLight(float3 albedo, float3 normalW, float3 posW, float shadow)
 {
     float3 lightDir = SafeNormalize(-gDirLight.Direction);
     float ndotl = saturate(dot(normalW, lightDir));
 
-    float shadow = CalcShadowFactor(posW, normalW);
-
     return albedo * gDirLight.Color * gDirLight.Intensity * ndotl * shadow;
+}
+
+float3 ApplyShadowMask(float3 color, float3 posW, float shadow)
+{
+    
+    float shadowArea = saturate((1.0f - shadow) * 1.35f);
+
+   
+    float2 maskUV = frac(posW.xz * 0.35f);
+    float3 maskColor = gShadowMaskTex.Sample(gSam, maskUV).rgb;
+
+  
+    return lerp(color, color * 0.55f + maskColor * 0.45f, shadowArea);
 }
 
 float4 PSMain(PSIn pin) : SV_Target
@@ -181,11 +194,15 @@ float4 PSMain(PSIn pin) : SV_Target
     if (debugCascade == 3)
         return float4(1.0f, 1.0f, 0.0f, 1.0f);
 
-    return float4(1.0f, 0.0f, 1.0f, 1.0f); // вне каскадов
+    return float4(1.0f, 0.0f, 1.0f, 1.0f); //  
 #endif
 
+    float shadow = CalcShadowFactor(posW, normalW);
+
     float3 color = albedo * gAmbientColor;
-    color += CalcDirectionalLight(albedo, normalW, posW);
+    color += CalcDirectionalLight(albedo, normalW, posW, shadow);
+
+    color = ApplyShadowMask(color, posW, shadow);
 
     return float4(saturate(color), 1.0f);
 }

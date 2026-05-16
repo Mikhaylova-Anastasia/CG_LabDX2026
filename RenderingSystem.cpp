@@ -306,7 +306,7 @@ void RenderingSystem::BuildSceneGeometry()
 {
     std::wstring exeDir = GetExeDir_RS();
 
-    // Sponza
+    
     mSponzaScene.ObjPath = exeDir + L"Models\\sponza.obj";
     mSponzaScene.AssetDir = GetDirPart_RS(mSponzaScene.ObjPath);
     mSponzaScene.UseTessellation = false;
@@ -322,7 +322,7 @@ void RenderingSystem::BuildSceneGeometry()
     }
     mSponzaScene.DrawSubmeshes = mSponzaScene.CpuMesh.Submeshes;
 
-    // Tessellation scene
+   
     mTessScene.ObjPath = exeDir + L"Models\\cylinder.obj";
     mTessScene.AssetDir = GetDirPart_RS(mTessScene.ObjPath);
     mTessScene.UseTessellation = true;
@@ -343,7 +343,7 @@ void RenderingSystem::BuildSceneGeometry()
     }
     mTessScene.DrawSubmeshes = mTessScene.CpuMesh.Submeshes;
 
-    // Optimization scene with real OBJ
+    
     mOptimizationScene.ObjPath = exeDir + L"Models\\Box of bottles.obj";
     mOptimizationScene.AssetDir = GetDirPart_RS(mOptimizationScene.ObjPath);
     mOptimizationScene.UseTessellation = false;
@@ -359,7 +359,7 @@ void RenderingSystem::BuildSceneGeometry()
 
     mOptimizationScene.DrawSubmeshes = mOptimizationScene.CpuMesh.Submeshes;
 
-    // Procedural shadow debug scene: no external OBJ, no weird pivots, no broken floor.
+   
     mShadowTestScene.ObjPath = L"";
     mShadowTestScene.AssetDir = L"";
     mShadowTestScene.UseTessellation = false;
@@ -780,15 +780,20 @@ void RenderingSystem::BuildSceneTextures()
 
     mModelTextureCount = (UINT)mTextures.size();
     mGBufferSrvStartIndex = mModelTextureCount;
+
+   
+    std::wstring maskPath = GetExeDir_RS() + L"Models\\check.png";
+    LoadTexture_WIC(maskPath, mShadowMaskTexture, mShadowMaskUpload);
 }
 void RenderingSystem::BuildDescriptorHeaps()
 {
     const UINT extra = 10;
 
     mShadowSrvIndex = mGBufferSrvStartIndex + 3;
+    mShadowMaskSrvIndex = mShadowSrvIndex + 1;
 
     D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
-    srvHeapDesc.NumDescriptors = mModelTextureCount + 3 + 1 + extra;
+    srvHeapDesc.NumDescriptors = mModelTextureCount + 3 + 1 + 1 + extra;
     srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     ThrowIfFailed(mDevice->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&mSrvHeap)));
@@ -864,6 +869,9 @@ void RenderingSystem::BuildShadowResources()
     }
 
     CreateShadowTextureArraySrv(mShadowSrvIndex);
+
+    if (mShadowMaskTexture)
+        CreateTextureSrv(mShadowMaskSrvIndex, mShadowMaskTexture.Get());
 }
 
 void RenderingSystem::BuildConstantBuffers()
@@ -883,7 +891,8 @@ void RenderingSystem::BuildConstantBuffers()
         nullptr,
         IID_PPV_ARGS(&mGeometryCB)));
 
-    D3D12_RESOURCE_DESC shadowGeomCbDesc = CD3DX12_RESOURCE_DESC::Buffer(mGeometryCBByteSize);
+    UINT64 shadowCbCount = (UINT64)ShadowCascadeCount * (UINT64)(mOptObjects.empty() ? 1 : mOptObjects.size());
+    D3D12_RESOURCE_DESC shadowGeomCbDesc = CD3DX12_RESOURCE_DESC::Buffer((UINT64)mGeometryCBByteSize * shadowCbCount);
     ThrowIfFailed(mDevice->CreateCommittedResource(
         &uploadHeapProps,
         D3D12_HEAP_FLAG_NONE,
@@ -962,7 +971,7 @@ void RenderingSystem::BuildRootSignatures()
     {
         CD3DX12_ROOT_PARAMETER rootParams[2];
         CD3DX12_DESCRIPTOR_RANGE srvRange;
-        srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4, 0);
+        srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 5, 0);
         rootParams[0].InitAsDescriptorTable(1, &srvRange, D3D12_SHADER_VISIBILITY_PIXEL);
         rootParams[1].InitAsConstantBufferView(0);
 
@@ -1092,9 +1101,10 @@ void RenderingSystem::BuildPSOs()
         psoDesc.PS.BytecodeLength = 0;
 
         CD3DX12_RASTERIZER_DESC rast(D3D12_DEFAULT);
-        rast.CullMode = D3D12_CULL_MODE_NONE;
-        rast.DepthBias = 100;
-        rast.SlopeScaledDepthBias = 0.5f;
+        // For Sponza this greatly reduces self-shadowing/acne on dense geometry.
+        rast.CullMode = D3D12_CULL_MODE_FRONT;
+        rast.DepthBias = 2000;
+        rast.SlopeScaledDepthBias = 2.0f;
         rast.DepthBiasClamp = 0.0f;
         psoDesc.RasterizerState = rast;
         psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
@@ -1414,8 +1424,14 @@ void RenderingSystem::UpdateOptimizationGeometryCB(UINT objectIndex, CXMMATRIX w
 void RenderingSystem::UpdateShadowCascades()
 {
     const float cameraNear = 0.1f;
-    const float shadowDistance = 120.0f;
-    const float lambda = 0.55f;
+
+    // Sponza is much less forgiving than the simple shadow-test scene:
+    // it has long walls/columns and many casters outside the currently visible camera frustum.
+    // A slightly longer distance and a more stable square ortho projection makes the shadows
+    // stop "swimming" and disappearing when the camera moves.
+    const bool isSponza = (mMode == RenderMode::Sponza);
+    const float shadowDistance = isSponza ? 160.0f : 120.0f;
+    const float lambda = isSponza ? 0.50f : 0.55f;
 
     const float aspect = (mHeight > 0) ? ((float)mWidth / (float)mHeight) : 1.0f;
     const float fovY = 0.25f * XM_PI;
@@ -1490,37 +1506,35 @@ void RenderingSystem::UpdateShadowCascades()
             radius = std::max(radius, XMVectorGetX(XMVector3Length(v)));
         }
 
+        // Make the ortho box a stable square. This is less tight than min/max fitting,
+        // but it is much more stable on Sponza and avoids clipping columns/walls at cascade edges.
         radius = ceilf(radius);
+        radius += isSponza ? 4.0f : 1.5f;
 
-        XMVECTOR lightPos = center - lightDir * 500.0f;
-
+        XMVECTOR lightPos = center - lightDir * (radius * (isSponza ? 1.2f : 2.0f));
         XMMATRIX lightView = XMMatrixLookAtLH(lightPos, center, up);
 
-        float minX = FLT_MAX;
-        float minY = FLT_MAX;
+        XMVECTOR centerLSv = XMVector3TransformCoord(center, lightView);
+        float centerLSX = XMVectorGetX(centerLSv);
+        float centerLSY = XMVectorGetY(centerLSv);
+
+        float minX = centerLSX - radius;
+        float maxX = centerLSX + radius;
+        float minY = centerLSY - radius;
+        float maxY = centerLSY + radius;
+
         float minZ = FLT_MAX;
-        float maxX = -FLT_MAX;
-        float maxY = -FLT_MAX;
         float maxZ = -FLT_MAX;
 
         for (int i = 0; i < 8; ++i)
         {
             XMVECTOR cornerLS = XMVector3TransformCoord(cornersWorld[i], lightView);
-
-            float x = XMVectorGetX(cornerLS);
-            float y = XMVectorGetY(cornerLS);
             float z = XMVectorGetZ(cornerLS);
-
-            minX = std::min(minX, x);
-            minY = std::min(minY, y);
             minZ = std::min(minZ, z);
-
-            maxX = std::max(maxX, x);
-            maxY = std::max(maxY, y);
             maxZ = std::max(maxZ, z);
         }
 
-        float extraDepth = 250.0f;
+        float extraDepth = isSponza ? radius * 2.5f : 250.0f;
         minZ -= extraDepth;
         maxZ += extraDepth;
 
@@ -1563,7 +1577,7 @@ void RenderingSystem::UpdateShadowCascades()
     );
 }
 
-void RenderingSystem::UpdateShadowGeometryCB(CXMMATRIX world, CXMMATRIX lightViewProj)
+void RenderingSystem::UpdateShadowGeometryCB(UINT cascadeIndex, UINT objectIndex, CXMMATRIX world, CXMMATRIX lightViewProj)
 {
     GeometryConstants data = {};
 
@@ -1580,9 +1594,12 @@ void RenderingSystem::UpdateShadowGeometryCB(CXMMATRIX world, CXMMATRIX lightVie
     data.DisplacementScale = 0.0f;
     data.NormalMapFlipY = 0.0f;
 
-    void* mapped = nullptr;
-    ThrowIfFailed(mShadowGeometryCB->Map(0, nullptr, &mapped));
-    memcpy(mapped, &data, sizeof(GeometryConstants));
+    UINT objectCount = (UINT)(mOptObjects.empty() ? 1 : mOptObjects.size());
+    UINT cbIndex = cascadeIndex * objectCount + objectIndex;
+
+    BYTE* mapped = nullptr;
+    ThrowIfFailed(mShadowGeometryCB->Map(0, nullptr, reinterpret_cast<void**>(&mapped)));
+    memcpy(mapped + (size_t)cbIndex * mGeometryCBByteSize, &data, sizeof(GeometryConstants));
     mShadowGeometryCB->Unmap(0, nullptr);
 }
 
@@ -1591,9 +1608,12 @@ void RenderingSystem::UpdateLightCB(float totalTime)
     mLightingData.EyePosW = mCameraPos;
     mLightingData.AmbientColor = { 0.22f, 0.22f, 0.24f };
 
-    mLightingData.DirLight.Direction = { -0.6f, -0.5f, 0.6f };
+    
+    XMVECTOR sunDir = XMVector3Normalize(XMVectorSet(-0.05f, -1.0f, 0.03f, 0.0f));
+    XMStoreFloat3(&mLightingData.DirLight.Direction, sunDir);
+
     mLightingData.DirLight.Color = { 1.0f, 1.0f, 1.0f };
-    mLightingData.DirLight.Intensity = 1.4f;
+    mLightingData.DirLight.Intensity = 1.35f;
 
     mLightingData.PointLights[0].Range = 0.0f;
     mLightingData.PointLights[0].Intensity = 0.0f;
@@ -1946,11 +1966,13 @@ void RenderingSystem::DrawOptimizationGeometryPass(
 void RenderingSystem::DrawSceneIntoShadowMap(
     ID3D12GraphicsCommandList* cmdList,
     const SceneMesh& scene,
-    CXMMATRIX lightViewProj)
+    CXMMATRIX lightViewProj,
+    UINT cascadeIndex)
 {
     XMMATRIX world = XMLoadFloat4x4(&scene.World);
 
-    if (&scene == &mTessScene)
+   
+    if (mMode == RenderMode::Tessellation)
     {
         world =
             XMMatrixRotationX(mObjectPitch) *
@@ -1958,7 +1980,7 @@ void RenderingSystem::DrawSceneIntoShadowMap(
             world;
     }
 
-    UpdateShadowGeometryCB(world, lightViewProj);
+    UpdateShadowGeometryCB(cascadeIndex, 0, world, lightViewProj);
 
     cmdList->SetPipelineState(mShadowPSO.Get());
     cmdList->SetGraphicsRootSignature(mShadowRootSig.Get());
@@ -1967,9 +1989,12 @@ void RenderingSystem::DrawSceneIntoShadowMap(
     cmdList->IASetVertexBuffers(0, 1, &scene.VBV);
     cmdList->IASetIndexBuffer(&scene.IBV);
 
+    UINT objectCount = (UINT)(mOptObjects.empty() ? 1 : mOptObjects.size());
+    UINT cbIndex = cascadeIndex * objectCount;
+
     cmdList->SetGraphicsRootConstantBufferView(
         0,
-        mShadowGeometryCB->GetGPUVirtualAddress());
+        mShadowGeometryCB->GetGPUVirtualAddress() + (UINT64)cbIndex * mGeometryCBByteSize);
 
     for (const ObjSubmesh& sm : scene.DrawSubmeshes)
     {
@@ -1984,7 +2009,8 @@ void RenderingSystem::DrawSceneIntoShadowMap(
 
 void RenderingSystem::DrawOptimizationIntoShadowMap(
     ID3D12GraphicsCommandList* cmdList,
-    CXMMATRIX lightViewProj)
+    CXMMATRIX lightViewProj,
+    UINT cascadeIndex)
 {
     cmdList->SetPipelineState(mShadowPSO.Get());
     cmdList->SetGraphicsRootSignature(mShadowRootSig.Get());
@@ -1993,15 +2019,20 @@ void RenderingSystem::DrawOptimizationIntoShadowMap(
     cmdList->IASetVertexBuffers(0, 1, &mOptimizationScene.VBV);
     cmdList->IASetIndexBuffer(&mOptimizationScene.IBV);
 
-    for (const SceneObject& obj : mOptObjects)
+    UINT objectCount = (UINT)(mOptObjects.empty() ? 1 : mOptObjects.size());
+
+    for (UINT objectIndex = 0; objectIndex < (UINT)mOptObjects.size(); ++objectIndex)
     {
+        const SceneObject& obj = mOptObjects[objectIndex];
         XMMATRIX world = XMLoadFloat4x4(&obj.World);
 
-        UpdateShadowGeometryCB(world, lightViewProj);
+        UpdateShadowGeometryCB(cascadeIndex, objectIndex, world, lightViewProj);
+
+        UINT cbIndex = cascadeIndex * objectCount + objectIndex;
 
         cmdList->SetGraphicsRootConstantBufferView(
             0,
-            mShadowGeometryCB->GetGPUVirtualAddress());
+            mShadowGeometryCB->GetGPUVirtualAddress() + (UINT64)cbIndex * mGeometryCBByteSize);
 
         for (const ObjSubmesh& sm : mOptimizationScene.DrawSubmeshes)
         {
@@ -2045,19 +2076,19 @@ void RenderingSystem::DrawShadowPass(ID3D12GraphicsCommandList* cmdList)
         switch (mMode)
         {
         case RenderMode::Sponza:
-            DrawSceneIntoShadowMap(cmdList, mSponzaScene, lightViewProj);
+            DrawSceneIntoShadowMap(cmdList, mSponzaScene, lightViewProj, cascade);
             break;
 
         case RenderMode::Tessellation:
-            DrawSceneIntoShadowMap(cmdList, mTessScene, lightViewProj);
+            DrawSceneIntoShadowMap(cmdList, mTessScene, lightViewProj, cascade);
             break;
 
         case RenderMode::Optimization:
-            DrawOptimizationIntoShadowMap(cmdList, lightViewProj);
+            DrawOptimizationIntoShadowMap(cmdList, lightViewProj, cascade);
             break;
 
         case RenderMode::ShadowTest:
-            DrawSceneIntoShadowMap(cmdList, mShadowTestScene, lightViewProj);
+            DrawSceneIntoShadowMap(cmdList, mShadowTestScene, lightViewProj, cascade);
             break;
         }
     }
@@ -2098,16 +2129,16 @@ void RenderingSystem::Draw(
     ID3D12DescriptorHeap* heaps[] = { mSrvHeap.Get() };
     cmdList->SetDescriptorHeaps(1, heaps);
 
-    
+
     DrawShadowPass(cmdList);
 
-    
+
     D3D12_VIEWPORT viewport = { 0.0f, 0.0f, (float)mWidth, (float)mHeight, 0.0f, 1.0f };
     D3D12_RECT scissor = { 0, 0, (LONG)mWidth, (LONG)mHeight };
     cmdList->RSSetViewports(1, &viewport);
     cmdList->RSSetScissorRects(1, &scissor);
 
-    
+
     switch (mMode)
     {
     case RenderMode::Sponza:
@@ -2130,6 +2161,6 @@ void RenderingSystem::Draw(
         break;
     }
 
-    
+
     DrawLightingPass(cmdList, backBufferRtv);
 }

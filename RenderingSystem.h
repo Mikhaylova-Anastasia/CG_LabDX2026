@@ -192,7 +192,7 @@ private:
     void UpdateOptimizationGeometryCB(UINT objectIndex, DirectX::CXMMATRIX world);
     void UpdateLightCB(float totalTime);
     void UpdateShadowCascades();
-    void UpdateShadowGeometryCB(DirectX::CXMMATRIX world, DirectX::CXMMATRIX lightViewProj);
+    void UpdateShadowGeometryCB(UINT cascadeIndex, UINT objectIndex, DirectX::CXMMATRIX world, DirectX::CXMMATRIX lightViewProj);
 
     void DrawSceneGeometryPass(
         ID3D12GraphicsCommandList* cmdList,
@@ -204,16 +204,15 @@ private:
         D3D12_CPU_DESCRIPTOR_HANDLE depthDsv);
 
     void DrawShadowPass(ID3D12GraphicsCommandList* cmdList);
-    void DrawSceneIntoShadowMap(ID3D12GraphicsCommandList* cmdList, const SceneMesh& scene, DirectX::CXMMATRIX lightViewProj);
-    void DrawOptimizationIntoShadowMap(ID3D12GraphicsCommandList* cmdList, DirectX::CXMMATRIX lightViewProj);
+    void DrawSceneIntoShadowMap(ID3D12GraphicsCommandList* cmdList, const SceneMesh& scene, DirectX::CXMMATRIX lightViewProj, UINT cascadeIndex);
+    void DrawOptimizationIntoShadowMap(ID3D12GraphicsCommandList* cmdList, DirectX::CXMMATRIX lightViewProj, UINT cascadeIndex);
     void DrawLightingPass(ID3D12GraphicsCommandList* cmdList, D3D12_CPU_DESCRIPTOR_HANDLE backBufferRtv);
 
 private:
     void ResetCameraForMode(RenderMode mode);
 
 public:
-    // These getters are used by CubeApp.cpp for particles.
-    // They do not change the camera logic or controls.
+    
     DirectX::XMMATRIX GetViewMatrix() const;
     DirectX::XMMATRIX GetProjMatrix() const;
     DirectX::XMMATRIX GetViewProjMatrix() const;
@@ -281,6 +280,10 @@ private:
     UINT mModelTextureCount = 0;
     UINT mGBufferSrvStartIndex = 0;
     UINT mShadowSrvIndex = 0;
+    UINT mShadowMaskSrvIndex = 0;
+
+    Microsoft::WRL::ComPtr<ID3D12Resource> mShadowMaskTexture;
+    Microsoft::WRL::ComPtr<ID3D12Resource> mShadowMaskUpload;
 
     Microsoft::WRL::ComPtr<ID3D12Resource> mGeometryCB;
     Microsoft::WRL::ComPtr<ID3D12Resource> mShadowGeometryCB;
