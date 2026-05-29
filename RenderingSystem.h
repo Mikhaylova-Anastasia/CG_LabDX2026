@@ -212,7 +212,7 @@ private:
     void ResetCameraForMode(RenderMode mode);
 
 public:
-    
+
     DirectX::XMMATRIX GetViewMatrix() const;
     DirectX::XMMATRIX GetProjMatrix() const;
     DirectX::XMMATRIX GetViewProjMatrix() const;

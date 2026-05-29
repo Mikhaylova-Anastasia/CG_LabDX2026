@@ -306,7 +306,7 @@ void RenderingSystem::BuildSceneGeometry()
 {
     std::wstring exeDir = GetExeDir_RS();
 
-    
+
     mSponzaScene.ObjPath = exeDir + L"Models\\sponza.obj";
     mSponzaScene.AssetDir = GetDirPart_RS(mSponzaScene.ObjPath);
     mSponzaScene.UseTessellation = false;
@@ -322,7 +322,7 @@ void RenderingSystem::BuildSceneGeometry()
     }
     mSponzaScene.DrawSubmeshes = mSponzaScene.CpuMesh.Submeshes;
 
-   
+
     mTessScene.ObjPath = exeDir + L"Models\\cylinder.obj";
     mTessScene.AssetDir = GetDirPart_RS(mTessScene.ObjPath);
     mTessScene.UseTessellation = true;
@@ -343,7 +343,7 @@ void RenderingSystem::BuildSceneGeometry()
     }
     mTessScene.DrawSubmeshes = mTessScene.CpuMesh.Submeshes;
 
-    
+
     mOptimizationScene.ObjPath = exeDir + L"Models\\Box of bottles.obj";
     mOptimizationScene.AssetDir = GetDirPart_RS(mOptimizationScene.ObjPath);
     mOptimizationScene.UseTessellation = false;
@@ -359,7 +359,7 @@ void RenderingSystem::BuildSceneGeometry()
 
     mOptimizationScene.DrawSubmeshes = mOptimizationScene.CpuMesh.Submeshes;
 
-   
+
     mShadowTestScene.ObjPath = L"";
     mShadowTestScene.AssetDir = L"";
     mShadowTestScene.UseTessellation = false;
@@ -781,7 +781,7 @@ void RenderingSystem::BuildSceneTextures()
     mModelTextureCount = (UINT)mTextures.size();
     mGBufferSrvStartIndex = mModelTextureCount;
 
-   
+
     std::wstring maskPath = GetExeDir_RS() + L"Models\\check.png";
     LoadTexture_WIC(maskPath, mShadowMaskTexture, mShadowMaskUpload);
 }
@@ -1031,8 +1031,8 @@ void RenderingSystem::BuildPSOs()
     compile(L"Shaders/GBufferTessVS.hlsl", "VSMain", "vs_5_0", tessVs);
     compile(L"Shaders/GBufferHS.hlsl", "HSMain", "hs_5_0", gHs);
     compile(L"Shaders/GBufferDS.hlsl", "DSMain", "ds_5_0", gDs);
-    compile(L"Shaders/DeferredLightVS.hlsl", "VSMain", "vs_5_0", lVs);
-    compile(L"Shaders/DeferredLightPS.hlsl", "PSMain", "ps_5_0", lPs);
+    compile(L"Shaders/PostProcessVS.hlsl", "VSMain", "vs_5_0", lVs);
+    compile(L"Shaders/PostProcessPS.hlsl", "PSMain", "ps_5_0", lPs);
     compile(L"Shaders/ShadowMapVS.hlsl", "VSMain", "vs_5_0", shadowVs);
 
     D3D12_INPUT_ELEMENT_DESC inputLayout[] =
@@ -1608,7 +1608,7 @@ void RenderingSystem::UpdateLightCB(float totalTime)
     mLightingData.EyePosW = mCameraPos;
     mLightingData.AmbientColor = { 0.22f, 0.22f, 0.24f };
 
-    
+
     XMVECTOR sunDir = XMVector3Normalize(XMVectorSet(-0.05f, -1.0f, 0.03f, 0.0f));
     XMStoreFloat3(&mLightingData.DirLight.Direction, sunDir);
 
@@ -1971,7 +1971,7 @@ void RenderingSystem::DrawSceneIntoShadowMap(
 {
     XMMATRIX world = XMLoadFloat4x4(&scene.World);
 
-   
+
     if (mMode == RenderMode::Tessellation)
     {
         world =
@@ -2118,7 +2118,7 @@ void RenderingSystem::DrawLightingPass(ID3D12GraphicsCommandList* cmdList, D3D12
     cmdList->SetGraphicsRootDescriptorTable(0, gbufSrvGpu);
     cmdList->SetGraphicsRootConstantBufferView(1, mLightingCB->GetGPUVirtualAddress());
     cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    cmdList->DrawInstanced(3, 1, 0, 0);
+    cmdList->DrawInstanced(6, 1, 0, 0);
 }
 
 void RenderingSystem::Draw(
