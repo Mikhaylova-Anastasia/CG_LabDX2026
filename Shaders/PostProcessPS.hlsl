@@ -1,5 +1,3 @@
-
-
 #define DEBUG_CASCADES 0
 
 Texture2D gAlbedoTex : register(t0);
@@ -160,35 +158,26 @@ float3 CalcDirectionalLight(float3 albedo, float3 normalW, float3 posW, float sh
 
 float3 ApplyShadowMask(float3 color, float3 posW, float shadow)
 {
-    
     float shadowArea = saturate((1.0f - shadow) * 1.35f);
 
-   
     float2 maskUV = frac(posW.xz * 0.35f);
     float3 maskColor = gShadowMaskTex.Sample(gSam, maskUV).rgb;
 
-  
     return lerp(color, color * 0.55f + maskColor * 0.45f, shadowArea);
 }
 
-
 float3 ApplyReinhardToneMapping(float3 hdrColor)
 {
-    // HDR -> LDR tone mapping from the lecture.
-    // Color values can be higher than 1.0 during lighting, so we compress them to displayable range.
     return hdrColor / (hdrColor + 1.0f);
 }
 
 float3 ApplyGammaCorrection(float3 ldrColor)
 {
-    // Convert linear color to approximately sRGB for the monitor.
     return pow(saturate(ldrColor), 1.0f / 2.2f);
 }
 
 float3 ApplyVignette(float3 color, float2 uv)
 {
-    // Post-effect #2: camera-style vignetting.
-    // Pixels farther from the screen center become slightly darker.
     float2 centered = uv * 2.0f - 1.0f;
     float distanceFromCenter = dot(centered, centered);
     float vignette = saturate(1.0f - distanceFromCenter * 0.35f);
@@ -206,9 +195,40 @@ float Hash21(float2 p)
 
 float3 ApplyFilmGrain(float3 color, float2 uv)
 {
-    // Post-effect #2: subtle film grain / noise.
     float grain = Hash21(uv * 1920.0f) - 0.5f;
     return color + grain * 0.035f;
+}
+
+float DetectEdge(float2 uv)
+{
+    uint width, height;
+    gNormalTex.GetDimensions(width, height);
+
+    float2 texel = 1.0f / float2(width, height);
+
+    float3 nC = gNormalTex.Sample(gSam, uv).rgb;
+    float3 nR = gNormalTex.Sample(gSam, uv + float2(texel.x, 0.0f)).rgb;
+    float3 nU = gNormalTex.Sample(gSam, uv + float2(0.0f, texel.y)).rgb;
+
+    float3 pC = gPositionTex.Sample(gSam, uv).rgb;
+    float3 pR = gPositionTex.Sample(gSam, uv + float2(texel.x, 0.0f)).rgb;
+    float3 pU = gPositionTex.Sample(gSam, uv + float2(0.0f, texel.y)).rgb;
+
+    float normalEdge = length(nC - nR) + length(nC - nU);
+    float depthEdge = length(pC - pR) + length(pC - pU);
+
+    float edge = normalEdge * 1.5f + depthEdge * 0.03f;
+
+    return smoothstep(0.08f, 0.18f, edge);
+}
+
+float3 ApplyEdgeDetection(float3 color, float2 uv)
+{
+    float edge = DetectEdge(uv);
+
+    float3 edgeColor = float3(0.0f, 0.0f, 0.0f);
+
+    return lerp(color, edgeColor, edge);
 }
 
 float4 PSMain(PSIn pin) : SV_Target
@@ -224,7 +244,7 @@ float4 PSMain(PSIn pin) : SV_Target
     int debugCascade = SelectCascade(posW);
 
     if (debugCascade == 0)
-        return float4(1.0f, 0.0f, 0.0f, 1.0f); // near cascade
+        return float4(1.0f, 0.0f, 0.0f, 1.0f);
 
     if (debugCascade == 1)
         return float4(0.0f, 1.0f, 0.0f, 1.0f);
@@ -235,7 +255,7 @@ float4 PSMain(PSIn pin) : SV_Target
     if (debugCascade == 3)
         return float4(1.0f, 1.0f, 0.0f, 1.0f);
 
-    return float4(1.0f, 0.0f, 1.0f, 1.0f); //  
+    return float4(1.0f, 0.0f, 1.0f, 1.0f);
 #endif
 
     float shadow = CalcShadowFactor(posW, normalW);
@@ -245,14 +265,13 @@ float4 PSMain(PSIn pin) : SV_Target
 
     color = ApplyShadowMask(color, posW, shadow);
 
-    
     color *= 1.35f;
 
-    // Final post-processing stage.
-    color = ApplyReinhardToneMapping(color); // HDR -> LDR
-    color = ApplyVignette(color, pin.Tex); // post-effect #1
-    color = ApplyFilmGrain(color, pin.Tex); // post-effect #2
-    color = ApplyGammaCorrection(color); // final linear -> sRGB correction
+    color = ApplyReinhardToneMapping(color);
+    color = ApplyVignette(color, pin.Tex);
+    color = ApplyEdgeDetection(color, pin.Tex);
+    color = ApplyFilmGrain(color, pin.Tex);
+    color = ApplyGammaCorrection(color);
 
     return float4(saturate(color), 1.0f);
 }
