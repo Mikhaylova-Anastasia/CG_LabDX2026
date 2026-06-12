@@ -151,6 +151,10 @@ namespace
                     outMaterials[current].NormalMap = file;
                 else if (tag == "disp" || tag == "map_disp")
                     outMaterials[current].DisplacementMap = file;
+                else if (tag == "map_pr" || tag == "map_roughness" || tag == "roughness")
+                    outMaterials[current].RoughnessMap = file;
+                else if (tag == "map_pm" || tag == "map_metallic" || tag == "map_metalness" || tag == "metallic" || tag == "metalness")
+                    outMaterials[current].MetallicMap = file;
             }
         }
     }

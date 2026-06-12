@@ -178,11 +178,18 @@ private:
         Microsoft::WRL::ComPtr<ID3D12Resource>& tex,
         Microsoft::WRL::ComPtr<ID3D12Resource>& upload);
 
+    void LoadTexture_DDS(const std::wstring& filePath,
+        Microsoft::WRL::ComPtr<ID3D12Resource>& tex,
+        Microsoft::WRL::ComPtr<ID3D12Resource>& upload);
+
+    void LoadIblResources();
+
     void CreateSolidTextureRGBA(UINT rgba,
         Microsoft::WRL::ComPtr<ID3D12Resource>& tex,
         Microsoft::WRL::ComPtr<ID3D12Resource>& upload);
 
     void CreateTextureSrv(UINT srvIndex, ID3D12Resource* tex);
+    void CreateTextureCubeSrv(UINT srvIndex, ID3D12Resource* tex);
     void CreateShadowTextureArraySrv(UINT srvIndex);
 
     void UpdateCamera(const InputDevice& input, float dt);
@@ -281,9 +288,19 @@ private:
     UINT mGBufferSrvStartIndex = 0;
     UINT mShadowSrvIndex = 0;
     UINT mShadowMaskSrvIndex = 0;
+    UINT mIrradianceSrvIndex = 0;
+    UINT mPrefilterSrvIndex = 0;
+    UINT mBrdfLutSrvIndex = 0;
 
     Microsoft::WRL::ComPtr<ID3D12Resource> mShadowMaskTexture;
     Microsoft::WRL::ComPtr<ID3D12Resource> mShadowMaskUpload;
+
+    Microsoft::WRL::ComPtr<ID3D12Resource> mIrradianceMap;
+    Microsoft::WRL::ComPtr<ID3D12Resource> mIrradianceUpload;
+    Microsoft::WRL::ComPtr<ID3D12Resource> mPrefilterMap;
+    Microsoft::WRL::ComPtr<ID3D12Resource> mPrefilterUpload;
+    Microsoft::WRL::ComPtr<ID3D12Resource> mBrdfLut;
+    Microsoft::WRL::ComPtr<ID3D12Resource> mBrdfLutUpload;
 
     Microsoft::WRL::ComPtr<ID3D12Resource> mGeometryCB;
     Microsoft::WRL::ComPtr<ID3D12Resource> mShadowGeometryCB;

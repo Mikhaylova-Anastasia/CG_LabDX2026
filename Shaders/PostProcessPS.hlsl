@@ -5,11 +5,15 @@ Texture2D gNormalTex : register(t1);
 Texture2D gPositionTex : register(t2);
 Texture2DArray gShadowMap : register(t3);
 Texture2D gShadowMaskTex : register(t4);
+TextureCube gIrradianceMap : register(t5);
+TextureCube gPrefilterMap : register(t6);
+Texture2D gBrdfLUT : register(t7);
 
 SamplerState gSam : register(s0);
 SamplerComparisonState gShadowSam : register(s1);
 
 static const int CASCADE_COUNT = 4;
+static const float PI = 3.14159265359f;
 
 struct DirectionalLight
 {
@@ -73,6 +77,16 @@ float3 SafeNormalize(float3 v)
     return v * rsqrt(len2);
 }
 
+float3 ApplyReinhardToneMapping(float3 hdrColor)
+{
+    return hdrColor / (hdrColor + 1.0f);
+}
+
+float3 ApplyGammaCorrection(float3 ldrColor)
+{
+    return pow(saturate(ldrColor), 1.0f / 2.2f);
+}
+
 int SelectCascade(float3 posW)
 {
     float viewDepth = dot(posW - gEyePosW, gCameraForward.xyz);
@@ -108,7 +122,6 @@ float CalcShadowFactor(float3 posW, float3 normalW)
         return 1.0f;
 
     float3 shadowNdc = shadowH.xyz / shadowH.w;
-
     float2 uv = shadowNdc.xy * float2(0.5f, -0.5f) + 0.5f;
 
     if (uv.x < 0.0f || uv.x > 1.0f ||
@@ -148,97 +161,127 @@ float CalcShadowFactor(float3 posW, float3 normalW)
     return shadowSum / 9.0f;
 }
 
-float3 CalcDirectionalLight(float3 albedo, float3 normalW, float3 posW, float shadow)
+float DistributionGGX(float3 N, float3 H, float roughness)
 {
-    float3 lightDir = SafeNormalize(-gDirLight.Direction);
-    float ndotl = saturate(dot(normalW, lightDir));
+    float a = roughness * roughness;
+    float a2 = a * a;
 
-    return albedo * gDirLight.Color * gDirLight.Intensity * ndotl * shadow;
+    float NdotH = max(dot(N, H), 0.0f);
+    float NdotH2 = NdotH * NdotH;
+
+    float denom = (NdotH2 * (a2 - 1.0f) + 1.0f);
+    denom = PI * denom * denom;
+
+    return a2 / max(denom, 0.000001f);
 }
 
-float3 ApplyShadowMask(float3 color, float3 posW, float shadow)
+float GeometrySchlickGGX(float NdotV, float roughness)
 {
-    float shadowArea = saturate((1.0f - shadow) * 1.35f);
+    float r = roughness + 1.0f;
+    float k = (r * r) / 8.0f;
 
-    float2 maskUV = frac(posW.xz * 0.35f);
-    float3 maskColor = gShadowMaskTex.Sample(gSam, maskUV).rgb;
-
-    return lerp(color, color * 0.55f + maskColor * 0.45f, shadowArea);
+    float denom = NdotV * (1.0f - k) + k;
+    return NdotV / max(denom, 0.000001f);
 }
 
-float3 ApplyReinhardToneMapping(float3 hdrColor)
+float GeometrySmith(float3 N, float3 V, float3 L, float roughness)
 {
-    return hdrColor / (hdrColor + 1.0f);
+    float NdotV = max(dot(N, V), 0.0f);
+    float NdotL = max(dot(N, L), 0.0f);
+
+    float ggx2 = GeometrySchlickGGX(NdotV, roughness);
+    float ggx1 = GeometrySchlickGGX(NdotL, roughness);
+
+    return ggx1 * ggx2;
 }
 
-float3 ApplyGammaCorrection(float3 ldrColor)
+float3 FresnelSchlick(float cosTheta, float3 F0)
 {
-    return pow(saturate(ldrColor), 1.0f / 2.2f);
+    return F0 + (1.0f - F0) * pow(saturate(1.0f - cosTheta), 5.0f);
 }
 
-float3 ApplyVignette(float3 color, float2 uv)
+float3 FresnelSchlickRoughness(float cosTheta, float3 F0, float roughness)
 {
-    float2 centered = uv * 2.0f - 1.0f;
-    float distanceFromCenter = dot(centered, centered);
-    float vignette = saturate(1.0f - distanceFromCenter * 0.35f);
-    vignette = smoothstep(0.0f, 1.0f, vignette);
-
-    return color * vignette;
+    return F0 + (max(float3(1.0f - roughness, 1.0f - roughness, 1.0f - roughness), F0) - F0) *
+        pow(saturate(1.0f - cosTheta), 5.0f);
 }
 
-float Hash21(float2 p)
+float3 CalcPBRDirectionalLight(
+    float3 albedo,
+    float roughness,
+    float metallic,
+    float3 N,
+    float3 V,
+    float3 posW,
+    float shadow
+)
 {
-    p = frac(p * float2(123.34f, 345.45f));
-    p += dot(p, p + 34.345f);
-    return frac(p.x * p.y);
+    float3 L = SafeNormalize(-gDirLight.Direction);
+    float3 H = SafeNormalize(V + L);
+
+    float3 radiance = gDirLight.Color * gDirLight.Intensity;
+
+    float3 F0 = float3(0.04f, 0.04f, 0.04f);
+    F0 = lerp(F0, albedo, metallic);
+
+    float NDF = DistributionGGX(N, H, roughness);
+    float G = GeometrySmith(N, V, L, roughness);
+    float3 F = FresnelSchlick(max(dot(H, V), 0.0f), F0);
+
+    float3 numerator = NDF * G * F;
+    float denominator =
+        4.0f *
+        max(dot(N, V), 0.0f) *
+        max(dot(N, L), 0.0f) +
+        0.0001f;
+
+    float3 specular = numerator / denominator;
+
+    float3 kS = F;
+    float3 kD = 1.0f - kS;
+    kD *= 1.0f - metallic;
+
+    float NdotL = max(dot(N, L), 0.0f);
+
+    return (kD * albedo / PI + specular) * radiance * NdotL * shadow;
 }
 
-float3 ApplyFilmGrain(float3 color, float2 uv)
+float3 GetQuickSkyboxColor(float2 uv)
 {
-    float grain = Hash21(uv * 1920.0f) - 0.5f;
-    return color + grain * 0.035f;
-}
+   
+    float2 screenUv = uv * 2.0f - 1.0f;
+    screenUv.y = -screenUv.y;
 
-float DetectEdge(float2 uv)
-{
-    uint width, height;
-    gNormalTex.GetDimensions(width, height);
+    float3 skyDir = SafeNormalize(float3(screenUv.x, screenUv.y, 1.0f));
 
-    float2 texel = 1.0f / float2(width, height);
+    float3 skyColor = gPrefilterMap.SampleLevel(gSam, skyDir, 0.0f).rgb;
 
-    float3 nC = gNormalTex.Sample(gSam, uv).rgb;
-    float3 nR = gNormalTex.Sample(gSam, uv + float2(texel.x, 0.0f)).rgb;
-    float3 nU = gNormalTex.Sample(gSam, uv + float2(0.0f, texel.y)).rgb;
+    skyColor = ApplyReinhardToneMapping(skyColor);
+    skyColor = ApplyGammaCorrection(skyColor);
 
-    float3 pC = gPositionTex.Sample(gSam, uv).rgb;
-    float3 pR = gPositionTex.Sample(gSam, uv + float2(texel.x, 0.0f)).rgb;
-    float3 pU = gPositionTex.Sample(gSam, uv + float2(0.0f, texel.y)).rgb;
-
-    float normalEdge = length(nC - nR) + length(nC - nU);
-    float depthEdge = length(pC - pR) + length(pC - pU);
-
-    float edge = normalEdge * 1.5f + depthEdge * 0.03f;
-
-    return smoothstep(0.08f, 0.18f, edge);
-}
-
-float3 ApplyEdgeDetection(float3 color, float2 uv)
-{
-    float edge = DetectEdge(uv);
-
-    float3 edgeColor = float3(0.0f, 0.0f, 0.0f);
-
-    return lerp(color, edgeColor, edge);
+    return saturate(skyColor);
 }
 
 float4 PSMain(PSIn pin) : SV_Target
 {
-    float3 albedo = gAlbedoTex.Sample(gSam, pin.Tex).rgb;
+    float4 albedoRoughness = gAlbedoTex.Sample(gSam, pin.Tex);
+    float3 albedo = albedoRoughness.rgb;
+    float roughness = clamp(albedoRoughness.a, 0.04f, 1.0f);
 
-    float3 normalEncoded = gNormalTex.Sample(gSam, pin.Tex).rgb;
-    float3 normalW = SafeNormalize(normalEncoded * 2.0f - 1.0f);
+    float4 normalMetallic = gNormalTex.Sample(gSam, pin.Tex);
+    float3 normalW = SafeNormalize(normalMetallic.rgb * 2.0f - 1.0f);
+    float metallic = saturate(normalMetallic.a);
 
     float3 posW = gPositionTex.Sample(gSam, pin.Tex).rgb;
+
+    
+    bool isBackground = dot(normalMetallic.rgb, normalMetallic.rgb) < 0.0001f;
+
+    if (isBackground)
+    {
+        float3 skyColor = GetQuickSkyboxColor(pin.Tex);
+        return float4(skyColor, 1.0f);
+    }
 
 #if DEBUG_CASCADES
     int debugCascade = SelectCascade(posW);
@@ -258,19 +301,56 @@ float4 PSMain(PSIn pin) : SV_Target
     return float4(1.0f, 0.0f, 1.0f, 1.0f);
 #endif
 
+    float3 V = SafeNormalize(gEyePosW - posW);
+    float NdotV = max(dot(normalW, V), 0.0f);
+
     float shadow = CalcShadowFactor(posW, normalW);
 
-    float3 color = albedo * gAmbientColor;
-    color += CalcDirectionalLight(albedo, normalW, posW, shadow);
+    
 
-    color = ApplyShadowMask(color, posW, shadow);
+    float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
+    float3 F = FresnelSchlickRoughness(NdotV, F0, roughness);
 
-    color *= 1.35f;
+    float3 kS = F;
+    float3 kD = (1.0f - kS) * (1.0f - metallic);
+
+    
+    float3 irradiance = gIrradianceMap.Sample(gSam, normalW).rgb;
+    float3 diffuseIBL = irradiance * albedo;
+
+    
+    float3 R = reflect(-V, normalW);
+
+    const float MAX_REFLECTION_LOD = 7.0f;
+    float3 prefilteredColor = gPrefilterMap.SampleLevel(
+        gSam,
+        R,
+        roughness * MAX_REFLECTION_LOD
+    ).rgb;
+
+    float2 brdf = gBrdfLUT.Sample(gSam, float2(NdotV, roughness)).rg;
+    float3 specularIBL = prefilteredColor * (F * brdf.x + brdf.y);
+
+    float ao = 1.0f;
+    float3 ambient = (kD * diffuseIBL + specularIBL) * ao;
+
+    
+
+    float3 color = ambient;
+    color += CalcPBRDirectionalLight(
+        albedo,
+        roughness,
+        metallic,
+        normalW,
+        V,
+        posW,
+        shadow
+    );
+
+    
+    color *= 1.15f;
 
     color = ApplyReinhardToneMapping(color);
-    color = ApplyVignette(color, pin.Tex);
-    color = ApplyEdgeDetection(color, pin.Tex);
-    color = ApplyFilmGrain(color, pin.Tex);
     color = ApplyGammaCorrection(color);
 
     return float4(saturate(color), 1.0f);

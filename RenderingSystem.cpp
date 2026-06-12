@@ -55,6 +55,176 @@ static bool FileExists_RS(const std::wstring& path)
     return attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY);
 }
 
+
+#pragma pack(push, 1)
+struct DDSPixelFormat_RS
+{
+    uint32_t size;
+    uint32_t flags;
+    uint32_t fourCC;
+    uint32_t rgbBitCount;
+    uint32_t rBitMask;
+    uint32_t gBitMask;
+    uint32_t bBitMask;
+    uint32_t aBitMask;
+};
+
+struct DDSHeader_RS
+{
+    uint32_t size;
+    uint32_t flags;
+    uint32_t height;
+    uint32_t width;
+    uint32_t pitchOrLinearSize;
+    uint32_t depth;
+    uint32_t mipMapCount;
+    uint32_t reserved1[11];
+    DDSPixelFormat_RS ddspf;
+    uint32_t caps;
+    uint32_t caps2;
+    uint32_t caps3;
+    uint32_t caps4;
+    uint32_t reserved2;
+};
+
+struct DDSHeaderDX10_RS
+{
+    DXGI_FORMAT dxgiFormat;
+    uint32_t resourceDimension;
+    uint32_t miscFlag;
+    uint32_t arraySize;
+    uint32_t miscFlags2;
+};
+#pragma pack(pop)
+
+static uint32_t MakeFourCC_RS(char a, char b, char c, char d)
+{
+    return ((uint32_t)(uint8_t)a) |
+        ((uint32_t)(uint8_t)b << 8) |
+        ((uint32_t)(uint8_t)c << 16) |
+        ((uint32_t)(uint8_t)d << 24);
+}
+
+static bool IsBlockCompressed_RS(DXGI_FORMAT fmt)
+{
+    switch (fmt)
+    {
+    case DXGI_FORMAT_BC1_TYPELESS:
+    case DXGI_FORMAT_BC1_UNORM:
+    case DXGI_FORMAT_BC1_UNORM_SRGB:
+    case DXGI_FORMAT_BC2_TYPELESS:
+    case DXGI_FORMAT_BC2_UNORM:
+    case DXGI_FORMAT_BC2_UNORM_SRGB:
+    case DXGI_FORMAT_BC3_TYPELESS:
+    case DXGI_FORMAT_BC3_UNORM:
+    case DXGI_FORMAT_BC3_UNORM_SRGB:
+    case DXGI_FORMAT_BC4_TYPELESS:
+    case DXGI_FORMAT_BC4_UNORM:
+    case DXGI_FORMAT_BC4_SNORM:
+    case DXGI_FORMAT_BC5_TYPELESS:
+    case DXGI_FORMAT_BC5_UNORM:
+    case DXGI_FORMAT_BC5_SNORM:
+    case DXGI_FORMAT_BC6H_TYPELESS:
+    case DXGI_FORMAT_BC6H_UF16:
+    case DXGI_FORMAT_BC6H_SF16:
+    case DXGI_FORMAT_BC7_TYPELESS:
+    case DXGI_FORMAT_BC7_UNORM:
+    case DXGI_FORMAT_BC7_UNORM_SRGB:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static UINT BitsPerPixel_RS(DXGI_FORMAT fmt)
+{
+    switch (fmt)
+    {
+    case DXGI_FORMAT_R32G32B32A32_FLOAT:
+    case DXGI_FORMAT_R32G32B32A32_UINT:
+    case DXGI_FORMAT_R32G32B32A32_SINT:
+        return 128;
+    case DXGI_FORMAT_R16G16B16A16_FLOAT:
+    case DXGI_FORMAT_R16G16B16A16_UNORM:
+    case DXGI_FORMAT_R16G16B16A16_UINT:
+    case DXGI_FORMAT_R16G16B16A16_SNORM:
+    case DXGI_FORMAT_R16G16B16A16_SINT:
+    case DXGI_FORMAT_R32G32_FLOAT:
+    case DXGI_FORMAT_R32G32_UINT:
+    case DXGI_FORMAT_R32G32_SINT:
+        return 64;
+    case DXGI_FORMAT_R8G8B8A8_UNORM:
+    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+    case DXGI_FORMAT_R8G8B8A8_UINT:
+    case DXGI_FORMAT_R8G8B8A8_SNORM:
+    case DXGI_FORMAT_R8G8B8A8_SINT:
+    case DXGI_FORMAT_B8G8R8A8_UNORM:
+    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+    case DXGI_FORMAT_R16G16_FLOAT:
+    case DXGI_FORMAT_R16G16_UNORM:
+    case DXGI_FORMAT_R16G16_UINT:
+    case DXGI_FORMAT_R16G16_SNORM:
+    case DXGI_FORMAT_R16G16_SINT:
+    case DXGI_FORMAT_R32_FLOAT:
+    case DXGI_FORMAT_R32_UINT:
+    case DXGI_FORMAT_R32_SINT:
+        return 32;
+    case DXGI_FORMAT_R8G8_UNORM:
+    case DXGI_FORMAT_R8G8_UINT:
+    case DXGI_FORMAT_R8G8_SNORM:
+    case DXGI_FORMAT_R8G8_SINT:
+    case DXGI_FORMAT_R16_FLOAT:
+    case DXGI_FORMAT_R16_UNORM:
+    case DXGI_FORMAT_R16_UINT:
+    case DXGI_FORMAT_R16_SNORM:
+    case DXGI_FORMAT_R16_SINT:
+        return 16;
+    case DXGI_FORMAT_R8_UNORM:
+    case DXGI_FORMAT_R8_UINT:
+    case DXGI_FORMAT_R8_SNORM:
+    case DXGI_FORMAT_R8_SINT:
+    case DXGI_FORMAT_A8_UNORM:
+        return 8;
+    default:
+        return 0;
+    }
+}
+
+static void GetSurfaceInfo_RS(size_t width, size_t height, DXGI_FORMAT fmt,
+    size_t* outNumBytes, size_t* outRowBytes, size_t* outNumRows)
+{
+    size_t numBytes = 0;
+    size_t rowBytes = 0;
+    size_t numRows = 0;
+
+    if (IsBlockCompressed_RS(fmt))
+    {
+        size_t bytesPerBlock = (fmt == DXGI_FORMAT_BC1_TYPELESS || fmt == DXGI_FORMAT_BC1_UNORM ||
+            fmt == DXGI_FORMAT_BC1_UNORM_SRGB || fmt == DXGI_FORMAT_BC4_TYPELESS ||
+            fmt == DXGI_FORMAT_BC4_UNORM || fmt == DXGI_FORMAT_BC4_SNORM) ? 8 : 16;
+
+        size_t numBlocksWide = (std::max<size_t>)(1, (width + 3) / 4);
+        size_t numBlocksHigh = (std::max<size_t>)(1, (height + 3) / 4);
+        rowBytes = numBlocksWide * bytesPerBlock;
+        numRows = numBlocksHigh;
+        numBytes = rowBytes * numBlocksHigh;
+    }
+    else
+    {
+        UINT bpp = BitsPerPixel_RS(fmt);
+        if (bpp == 0)
+            throw std::runtime_error("Unsupported DDS DXGI format");
+
+        rowBytes = (width * bpp + 7) / 8;
+        numRows = height;
+        numBytes = rowBytes * height;
+    }
+
+    if (outNumBytes) *outNumBytes = numBytes;
+    if (outRowBytes) *outRowBytes = rowBytes;
+    if (outNumRows) *outNumRows = numRows;
+}
+
 static void AppendBox_RS(
     ObjMeshData& mesh,
     const DirectX::XMFLOAT3& center,
@@ -263,6 +433,7 @@ void RenderingSystem::BuildResources()
 {
     BuildSceneGeometry();
     BuildSceneTextures();
+    LoadIblResources();
 
     mGBuffer.Initialize(
         mDevice,
@@ -360,16 +531,28 @@ void RenderingSystem::BuildSceneGeometry()
     mOptimizationScene.DrawSubmeshes = mOptimizationScene.CpuMesh.Submeshes;
 
 
-    mShadowTestScene.ObjPath = L"";
-    mShadowTestScene.AssetDir = L"";
+   
+    mShadowTestScene.ObjPath = exeDir + L"Models\\Cerberus.obj";
+    mShadowTestScene.AssetDir = GetDirPart_RS(mShadowTestScene.ObjPath);
     mShadowTestScene.UseTessellation = false;
     mShadowTestScene.TessMin = 1.0f;
     mShadowTestScene.TessMax = 1.0f;
     mShadowTestScene.TessMaxDistance = 8.0f;
     mShadowTestScene.DisplacementScale = 0.0f;
     mShadowTestScene.NormalMapFlipY = 0.0f;
-    XMStoreFloat4x4(&mShadowTestScene.World, XMMatrixIdentity());
-    BuildShadowTestMesh_RS(mShadowTestScene.CpuMesh);
+
+    XMStoreFloat4x4(&mShadowTestScene.World,
+        
+        XMMatrixScaling(6.5f, 6.5f, 6.5f) *
+        XMMatrixRotationY(0.0f) *
+        XMMatrixTranslation(0.0f, 1.2f, 7.0f));
+
+    if (!ObjLoader::LoadObjPosNormalTex(mShadowTestScene.ObjPath, mShadowTestScene.CpuMesh, false))
+    {
+        MessageBoxW(nullptr, mShadowTestScene.ObjPath.c_str(), L"CERBERUS OBJ LOAD FAILED: check path, OBJ format, triangulation, normals, UVs", MB_OK | MB_ICONERROR);
+        throw std::runtime_error("Cerberus load failed");
+    }
+
     mShadowTestScene.DrawSubmeshes = mShadowTestScene.CpuMesh.Submeshes;
 
     auto buildGpuBuffers = [&](SceneMesh& scene)
@@ -737,18 +920,53 @@ void RenderingSystem::BuildSceneTextures()
                     it = scene.CpuMesh.Materials.find(key);
                 }
 
+                if (it == scene.CpuMesh.Materials.end() && scene.CpuMesh.Materials.size() == 1)
+                {
+                  
+                    it = scene.CpuMesh.Materials.begin();
+                }
+
                 if (it != scene.CpuMesh.Materials.end())
                     mat = it->second;
 
                 std::wstring diff = tryResolveTexture(scene, mat.DiffuseMap);
                 std::wstring norm = tryResolveTexture(scene, mat.NormalMap);
                 std::wstring disp = tryResolveTexture(scene, mat.DisplacementMap);
+                std::wstring rough = tryResolveTexture(scene, mat.RoughnessMap);
+                std::wstring metal = tryResolveTexture(scene, mat.MetallicMap);
+
+                
+                if (scene.ObjPath.find(L"Cerberus.obj") != std::wstring::npos ||
+                    scene.ObjPath.find(L"cerberus.obj") != std::wstring::npos)
+                {
+                    std::wstring modelsDir = GetExeDir_RS() + L"Models\\";
+                    diff = modelsDir + L"Cerberus_A.jpg";
+                    norm = modelsDir + L"Cerberus_N.jpg";
+                    rough = modelsDir + L"Cerberus_R.jpg";
+                    metal = modelsDir + L"Cerberus_M.jpg";
+                    disp = L"";
+
+                    std::wstring missing;
+                    if (!FileExists_RS(diff))  missing += L"Missing: " + diff + L"\n";
+                    if (!FileExists_RS(norm))  missing += L"Missing: " + norm + L"\n";
+                    if (!FileExists_RS(rough)) missing += L"Missing: " + rough + L"\n";
+                    if (!FileExists_RS(metal)) missing += L"Missing: " + metal + L"\n";
+
+                    if (!missing.empty())
+                    {
+                        MessageBoxW(nullptr, missing.c_str(),
+                            L"CERBERUS TEXTURE FILES NOT FOUND",
+                            MB_OK | MB_ICONERROR);
+                    }
+                }
 
                 UINT base = (UINT)mTextures.size();
 
-                addTex(diff, 0xFFFFFFFFu);   // white
-                addTex(norm, 0xFF8080FFu);   // flat normal
-                addTex(disp, 0xFF000000u);   // black height
+                addTex(diff, 0xFFFFFFFFu);   // t0: white albedo
+                addTex(norm, 0xFF8080FFu);   // t1: flat normal
+                addTex(disp, 0xFF000000u);   // t2: black height
+                addTex(rough, 0xFF808080u);  // t3: roughness = 0.5
+                addTex(metal, 0xFF000000u);  // t4: metallic = 0.0
 
                 scene.SubmeshBaseSrv.push_back(base);
             }
@@ -770,9 +988,11 @@ void RenderingSystem::BuildSceneTextures()
         {
             UINT base = (UINT)mTextures.size();
 
-            addTex(diff, 0xFFFFFFFFu);   // diffuse
-            addTex(norm, 0xFF8080FFu);   // normal
-            addTex(L"", 0xFF000000u);
+            addTex(diff, 0xFFFFFFFFu);   // t0: diffuse / albedo
+            addTex(norm, 0xFF8080FFu);   // t1: normal
+            addTex(L"", 0xFF000000u);    // t2: displacement / height
+            addTex(L"", 0xFF808080u);    // t3: roughness fallback = 0.5
+            addTex(L"", 0xFF000000u);    // t4: metallic fallback = 0.0
 
             mOptimizationScene.SubmeshBaseSrv.push_back(base);
         }
@@ -791,9 +1011,12 @@ void RenderingSystem::BuildDescriptorHeaps()
 
     mShadowSrvIndex = mGBufferSrvStartIndex + 3;
     mShadowMaskSrvIndex = mShadowSrvIndex + 1;
+    mIrradianceSrvIndex = mShadowMaskSrvIndex + 1;
+    mPrefilterSrvIndex = mIrradianceSrvIndex + 1;
+    mBrdfLutSrvIndex = mPrefilterSrvIndex + 1;
 
     D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
-    srvHeapDesc.NumDescriptors = mModelTextureCount + 3 + 1 + 1 + extra;
+    srvHeapDesc.NumDescriptors = mModelTextureCount + 3 + 1 + 1 + 3 + extra;
     srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     ThrowIfFailed(mDevice->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&mSrvHeap)));
@@ -816,6 +1039,13 @@ void RenderingSystem::BuildDescriptorHeaps()
     gbufSrvGpu.Offset((INT)mGBufferSrvStartIndex, mCbvSrvUavDescriptorSize);
 
     mGBuffer.CreateDescriptors(mDevice, rtvStart, gbufSrvCpu, gbufSrvGpu);
+
+    if (mIrradianceMap)
+        CreateTextureCubeSrv(mIrradianceSrvIndex, mIrradianceMap.Get());
+    if (mPrefilterMap)
+        CreateTextureCubeSrv(mPrefilterSrvIndex, mPrefilterMap.Get());
+    if (mBrdfLut)
+        CreateTextureSrv(mBrdfLutSrvIndex, mBrdfLut.Get());
 }
 
 void RenderingSystem::BuildShadowResources()
@@ -928,7 +1158,7 @@ void RenderingSystem::BuildRootSignatures()
         rootParams[0].InitAsConstantBufferView(0);
 
         CD3DX12_DESCRIPTOR_RANGE srvRange;
-        srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 0);
+        srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 5, 0);
         rootParams[1].InitAsDescriptorTable(1, &srvRange, D3D12_SHADER_VISIBILITY_ALL);
 
         CD3DX12_STATIC_SAMPLER_DESC staticSamp(
@@ -971,7 +1201,7 @@ void RenderingSystem::BuildRootSignatures()
     {
         CD3DX12_ROOT_PARAMETER rootParams[2];
         CD3DX12_DESCRIPTOR_RANGE srvRange;
-        srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 5, 0);
+        srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 8, 0);
         rootParams[0].InitAsDescriptorTable(1, &srvRange, D3D12_SHADER_VISIBILITY_PIXEL);
         rootParams[1].InitAsConstantBufferView(0);
 
@@ -1149,6 +1379,177 @@ void RenderingSystem::BuildPSOs()
     }
 }
 
+
+void RenderingSystem::LoadTexture_DDS(const std::wstring& filePath,
+    ComPtr<ID3D12Resource>& tex,
+    ComPtr<ID3D12Resource>& upload)
+{
+    std::ifstream fin(filePath, std::ios::binary | std::ios::ate);
+    if (!fin)
+    {
+        MessageBoxW(nullptr, filePath.c_str(), L"Cannot open DDS", MB_OK | MB_ICONERROR);
+        throw std::runtime_error("Cannot open DDS");
+    }
+
+    std::streamsize fileSize = fin.tellg();
+    fin.seekg(0, std::ios::beg);
+
+    std::vector<uint8_t> fileData((size_t)fileSize);
+    if (!fin.read(reinterpret_cast<char*>(fileData.data()), fileSize))
+        throw std::runtime_error("Failed to read DDS");
+
+    if (fileData.size() < sizeof(uint32_t) + sizeof(DDSHeader_RS))
+        throw std::runtime_error("Invalid DDS size");
+
+    const uint8_t* ptr = fileData.data();
+    uint32_t magic = *reinterpret_cast<const uint32_t*>(ptr);
+    ptr += sizeof(uint32_t);
+
+    if (magic != MakeFourCC_RS('D', 'D', 'S', ' '))
+    {
+        MessageBoxW(nullptr, filePath.c_str(), L"Invalid DDS magic", MB_OK | MB_ICONERROR);
+        throw std::runtime_error("Invalid DDS magic");
+    }
+
+    const DDSHeader_RS* header = reinterpret_cast<const DDSHeader_RS*>(ptr);
+    ptr += sizeof(DDSHeader_RS);
+
+    if (header->size != 124 || header->ddspf.size != 32)
+        throw std::runtime_error("Invalid DDS header");
+
+    if (header->ddspf.fourCC != MakeFourCC_RS('D', 'X', '1', '0'))
+    {
+        MessageBoxW(nullptr, filePath.c_str(), L"DDS without DX10 header is not supported by this simple loader", MB_OK | MB_ICONERROR);
+        throw std::runtime_error("DDS without DX10 header is not supported");
+    }
+
+    if ((size_t)(ptr - fileData.data()) + sizeof(DDSHeaderDX10_RS) > fileData.size())
+        throw std::runtime_error("Missing DDS DX10 header");
+
+    const DDSHeaderDX10_RS* dx10 = reinterpret_cast<const DDSHeaderDX10_RS*>(ptr);
+    ptr += sizeof(DDSHeaderDX10_RS);
+
+    const DXGI_FORMAT format = dx10->dxgiFormat;
+    const UINT width = header->width;
+    const UINT height = header->height;
+    const UINT mipCount = (std::max)(1u, header->mipMapCount);
+
+    UINT arraySize = (std::max)(1u, dx10->arraySize);
+    const bool isCube = (dx10->miscFlag & 0x4u) != 0;
+    if (isCube && arraySize == 1)
+        arraySize = 6;
+
+    D3D12_RESOURCE_DESC texDesc = {};
+    texDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    texDesc.Alignment = 0;
+    texDesc.Width = width;
+    texDesc.Height = height;
+    texDesc.DepthOrArraySize = (UINT16)arraySize;
+    texDesc.MipLevels = (UINT16)mipCount;
+    texDesc.Format = format;
+    texDesc.SampleDesc.Count = 1;
+    texDesc.SampleDesc.Quality = 0;
+    texDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    texDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+    CD3DX12_HEAP_PROPERTIES defaultHeap(D3D12_HEAP_TYPE_DEFAULT);
+    ThrowIfFailed(mDevice->CreateCommittedResource(
+        &defaultHeap,
+        D3D12_HEAP_FLAG_NONE,
+        &texDesc,
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        nullptr,
+        IID_PPV_ARGS(&tex)));
+
+    std::vector<D3D12_SUBRESOURCE_DATA> subresources;
+    subresources.reserve((size_t)arraySize * mipCount);
+
+    const uint8_t* dataBegin = ptr;
+    const uint8_t* dataEnd = fileData.data() + fileData.size();
+
+    for (UINT item = 0; item < arraySize; ++item)
+    {
+        UINT w = width;
+        UINT h = height;
+
+        for (UINT mip = 0; mip < mipCount; ++mip)
+        {
+            size_t numBytes = 0;
+            size_t rowBytes = 0;
+            size_t numRows = 0;
+            GetSurfaceInfo_RS(w, h, format, &numBytes, &rowBytes, &numRows);
+
+            if (dataBegin + numBytes > dataEnd)
+            {
+                MessageBoxW(nullptr, filePath.c_str(), L"DDS data ended unexpectedly", MB_OK | MB_ICONERROR);
+                throw std::runtime_error("DDS data ended unexpectedly");
+            }
+
+            D3D12_SUBRESOURCE_DATA sub = {};
+            sub.pData = dataBegin;
+            sub.RowPitch = (LONG_PTR)rowBytes;
+            sub.SlicePitch = (LONG_PTR)numBytes;
+            subresources.push_back(sub);
+
+            dataBegin += numBytes;
+            w = (std::max)(1u, w >> 1);
+            h = (std::max)(1u, h >> 1);
+        }
+    }
+
+    const UINT64 uploadBufferSize = GetRequiredIntermediateSize(
+        tex.Get(), 0, (UINT)subresources.size());
+
+    CD3DX12_HEAP_PROPERTIES uploadHeap(D3D12_HEAP_TYPE_UPLOAD);
+    D3D12_RESOURCE_DESC uploadDesc = CD3DX12_RESOURCE_DESC::Buffer(uploadBufferSize);
+    ThrowIfFailed(mDevice->CreateCommittedResource(
+        &uploadHeap,
+        D3D12_HEAP_FLAG_NONE,
+        &uploadDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ,
+        nullptr,
+        IID_PPV_ARGS(&upload)));
+
+    UpdateSubresources(
+        mInitCmdList,
+        tex.Get(),
+        upload.Get(),
+        0,
+        0,
+        (UINT)subresources.size(),
+        subresources.data());
+
+    auto barrier = CD3DX12_RESOURCE_BARRIER::Transition(
+        tex.Get(),
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    mInitCmdList->ResourceBarrier(1, &barrier);
+}
+
+void RenderingSystem::LoadIblResources()
+{
+    const std::wstring iblDir = GetExeDir_RS() + L"Models\\IBL\\";
+
+    const std::wstring irradiancePath = iblDir + L"IrradianceMap_BC6U.dds";
+    const std::wstring prefilterPath = iblDir + L"PreFilteredEnvMap_BC6U.dds";
+    const std::wstring brdfPath = iblDir + L"IntegrationMap.dds";
+
+    std::wstring missing;
+    if (!FileExists_RS(irradiancePath)) missing += L"Missing: " + irradiancePath + L"\n";
+    if (!FileExists_RS(prefilterPath))  missing += L"Missing: " + prefilterPath + L"\n";
+    if (!FileExists_RS(brdfPath))       missing += L"Missing: " + brdfPath + L"\n";
+
+    if (!missing.empty())
+    {
+        MessageBoxW(nullptr, missing.c_str(), L"IBL DDS FILES NOT FOUND", MB_OK | MB_ICONERROR);
+        throw std::runtime_error("IBL DDS files not found");
+    }
+
+    LoadTexture_DDS(irradiancePath, mIrradianceMap, mIrradianceUpload);
+    LoadTexture_DDS(prefilterPath, mPrefilterMap, mPrefilterUpload);
+    LoadTexture_DDS(brdfPath, mBrdfLut, mBrdfLutUpload);
+}
+
 void RenderingSystem::LoadTexture_WIC(const std::wstring& filePath,
     ComPtr<ID3D12Resource>& tex,
     ComPtr<ID3D12Resource>& upload)
@@ -1261,6 +1662,24 @@ void RenderingSystem::CreateTextureSrv(UINT srvIndex, ID3D12Resource* tex)
     mDevice->CreateShaderResourceView(tex, &srvDesc, hCpu);
 }
 
+
+
+void RenderingSystem::CreateTextureCubeSrv(UINT srvIndex, ID3D12Resource* tex)
+{
+    D3D12_RESOURCE_DESC desc = tex->GetDesc();
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Format = desc.Format;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+    srvDesc.TextureCube.MostDetailedMip = 0;
+    srvDesc.TextureCube.MipLevels = desc.MipLevels;
+    srvDesc.TextureCube.ResourceMinLODClamp = 0.0f;
+
+    CD3DX12_CPU_DESCRIPTOR_HANDLE hCpu(mSrvHeap->GetCPUDescriptorHandleForHeapStart());
+    hCpu.Offset((INT)srvIndex, mCbvSrvUavDescriptorSize);
+    mDevice->CreateShaderResourceView(tex, &srvDesc, hCpu);
+}
 
 void RenderingSystem::CreateShadowTextureArraySrv(UINT srvIndex)
 {
@@ -1425,10 +1844,7 @@ void RenderingSystem::UpdateShadowCascades()
 {
     const float cameraNear = 0.1f;
 
-    // Sponza is much less forgiving than the simple shadow-test scene:
-    // it has long walls/columns and many casters outside the currently visible camera frustum.
-    // A slightly longer distance and a more stable square ortho projection makes the shadows
-    // stop "swimming" and disappearing when the camera moves.
+   
     const bool isSponza = (mMode == RenderMode::Sponza);
     const float shadowDistance = isSponza ? 160.0f : 120.0f;
     const float lambda = isSponza ? 0.50f : 0.55f;
@@ -1506,8 +1922,7 @@ void RenderingSystem::UpdateShadowCascades()
             radius = std::max(radius, XMVectorGetX(XMVector3Length(v)));
         }
 
-        // Make the ortho box a stable square. This is less tight than min/max fitting,
-        // but it is much more stable on Sponza and avoids clipping columns/walls at cascade edges.
+       
         radius = ceilf(radius);
         radius += isSponza ? 4.0f : 1.5f;
 
@@ -1666,9 +2081,10 @@ void RenderingSystem::ResetCameraForMode(RenderMode mode)
         break;
 
     case RenderMode::ShadowTest:
-        mCameraPos = { 0.0f, 5.0f, -12.0f };
+        
+        mCameraPos = { 0.0f, 1.4f, -9.0f };
         mYaw = 0.0f;
-        mPitch = 0.18f;
+        mPitch = 0.0f;
         break;
     }
 }

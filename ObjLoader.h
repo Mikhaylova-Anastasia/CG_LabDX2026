@@ -24,6 +24,8 @@ struct ObjMaterialInfo
     std::string DiffuseMap;
     std::string NormalMap;
     std::string DisplacementMap;
+    std::string RoughnessMap;
+    std::string MetallicMap;
 };
 
 struct ObjMeshData

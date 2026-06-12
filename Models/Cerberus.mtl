@@ -1,0 +1,38 @@
+# Cerberus PBR material aliases.
+# Several newmtl blocks are intentional: Blender/FBX export can use different usemtl names.
+
+newmtl Cerberus00_Fixed
+Ka 1.000000 1.000000 1.000000
+Kd 1.000000 1.000000 1.000000
+Ks 0.000000 0.000000 0.000000
+Ns 10.000000
+d 1.000000
+illum 2
+map_Kd Cerberus_A.jpg
+norm Cerberus_N.jpg
+map_Pr Cerberus_R.jpg
+map_Pm Cerberus_M.jpg
+
+newmtl Cerberus
+Ka 1.000000 1.000000 1.000000
+Kd 1.000000 1.000000 1.000000
+Ks 0.000000 0.000000 0.000000
+Ns 10.000000
+d 1.000000
+illum 2
+map_Kd Cerberus_A.jpg
+norm Cerberus_N.jpg
+map_Pr Cerberus_R.jpg
+map_Pm Cerberus_M.jpg
+
+newmtl Material
+Ka 1.000000 1.000000 1.000000
+Kd 1.000000 1.000000 1.000000
+Ks 0.000000 0.000000 0.000000
+Ns 10.000000
+d 1.000000
+illum 2
+map_Kd Cerberus_A.jpg
+norm Cerberus_N.jpg
+map_Pr Cerberus_R.jpg
+map_Pm Cerberus_M.jpg
