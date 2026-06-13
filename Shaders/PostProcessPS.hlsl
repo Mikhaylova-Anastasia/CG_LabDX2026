@@ -1,5 +1,6 @@
 #define DEBUG_CASCADES 0
 
+
 Texture2D gAlbedoTex : register(t0);
 Texture2D gNormalTex : register(t1);
 Texture2D gPositionTex : register(t2);
@@ -58,7 +59,8 @@ cbuffer LightCB : register(b0)
     float4x4 gShadowViewProj[CASCADE_COUNT];
     float4 gCascadeSplits;
     float2 gShadowMapSize;
-    float2 pad2;
+    int gUseBeckmann; // 0 = GGX, 1 = Beckmann
+    float pad2;
 };
 
 struct PSIn
@@ -161,6 +163,7 @@ float CalcShadowFactor(float3 posW, float3 normalW)
     return shadowSum / 9.0f;
 }
 
+
 float DistributionGGX(float3 N, float3 H, float roughness)
 {
     float a = roughness * roughness;
@@ -173,6 +176,35 @@ float DistributionGGX(float3 N, float3 H, float roughness)
     denom = PI * denom * denom;
 
     return a2 / max(denom, 0.000001f);
+}
+
+
+float DistributionBeckmann(float3 N, float3 H, float roughness)
+{
+    float NdotH = max(dot(N, H), 0.0f);
+    float NdotH2 = NdotH * NdotH;
+
+    if (NdotH <= 0.0f)
+        return 0.0f;
+
+    float a = max(roughness * roughness, 0.001f);
+    float a2 = a * a;
+
+    float denom = PI * a2 * NdotH2 * NdotH2;
+    denom = max(denom, 0.000001f);
+
+    float exponent = (NdotH2 - 1.0f) / (a2 * NdotH2);
+    exponent = clamp(exponent, -80.0f, 0.0f);
+
+    return exp(exponent) / denom;
+}
+
+float DistributionNDF(float3 N, float3 H, float roughness)
+{
+    if (gUseBeckmann != 0)
+        return DistributionBeckmann(N, H, roughness);
+
+    return DistributionGGX(N, H, roughness);
 }
 
 float GeometrySchlickGGX(float NdotV, float roughness)
@@ -218,13 +250,13 @@ float3 CalcPBRDirectionalLight(
 {
     float3 L = SafeNormalize(-gDirLight.Direction);
     float3 H = SafeNormalize(V + L);
-
     float3 radiance = gDirLight.Color * gDirLight.Intensity;
 
     float3 F0 = float3(0.04f, 0.04f, 0.04f);
     F0 = lerp(F0, albedo, metallic);
 
-    float NDF = DistributionGGX(N, H, roughness);
+    
+    float NDF = DistributionNDF(N, H, roughness);
     float G = GeometrySmith(N, V, L, roughness);
     float3 F = FresnelSchlick(max(dot(H, V), 0.0f), F0);
 
@@ -248,12 +280,11 @@ float3 CalcPBRDirectionalLight(
 
 float3 GetQuickSkyboxColor(float2 uv)
 {
-   
+    
     float2 screenUv = uv * 2.0f - 1.0f;
     screenUv.y = -screenUv.y;
 
     float3 skyDir = SafeNormalize(float3(screenUv.x, screenUv.y, 1.0f));
-
     float3 skyColor = gPrefilterMap.SampleLevel(gSam, skyDir, 0.0f).rgb;
 
     skyColor = ApplyReinhardToneMapping(skyColor);
@@ -274,7 +305,7 @@ float4 PSMain(PSIn pin) : SV_Target
 
     float3 posW = gPositionTex.Sample(gSam, pin.Tex).rgb;
 
-    
+   
     bool isBackground = dot(normalMetallic.rgb, normalMetallic.rgb) < 0.0001f;
 
     if (isBackground)
@@ -303,22 +334,19 @@ float4 PSMain(PSIn pin) : SV_Target
 
     float3 V = SafeNormalize(gEyePosW - posW);
     float NdotV = max(dot(normalW, V), 0.0f);
-
     float shadow = CalcShadowFactor(posW, normalW);
 
-    
-
+  
     float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
     float3 F = FresnelSchlickRoughness(NdotV, F0, roughness);
 
     float3 kS = F;
     float3 kD = (1.0f - kS) * (1.0f - metallic);
-
     
     float3 irradiance = gIrradianceMap.Sample(gSam, normalW).rgb;
     float3 diffuseIBL = irradiance * albedo;
 
-    
+
     float3 R = reflect(-V, normalW);
 
     const float MAX_REFLECTION_LOD = 7.0f;
@@ -334,8 +362,6 @@ float4 PSMain(PSIn pin) : SV_Target
     float ao = 1.0f;
     float3 ambient = (kD * diffuseIBL + specularIBL) * ao;
 
-    
-
     float3 color = ambient;
     color += CalcPBRDirectionalLight(
         albedo,
@@ -347,9 +373,7 @@ float4 PSMain(PSIn pin) : SV_Target
         shadow
     );
 
-    
     color *= 1.15f;
-
     color = ApplyReinhardToneMapping(color);
     color = ApplyGammaCorrection(color);
 

@@ -72,7 +72,8 @@ struct LightConstants
     DirectX::XMFLOAT4X4 ShadowViewProj[ShadowCascadeCount];
     DirectX::XMFLOAT4 CascadeSplits;
     DirectX::XMFLOAT2 ShadowMapSize;
-    DirectX::XMFLOAT2 pad2;
+    int UseBeckmann = 0;       // 0 = GGX, 1 = Beckmann
+    float pad2 = 0.0f;
 };
 enum class RenderMode
 {
@@ -335,6 +336,7 @@ private:
 
     bool mEnableFrustumCulling = true;
     bool mEnableOctree = true;
+    bool mUseBeckmann = false;
 
     UINT mLastVisibleCount = 0;
     UINT mLastTotalCount = 0;

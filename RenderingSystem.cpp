@@ -531,7 +531,7 @@ void RenderingSystem::BuildSceneGeometry()
     mOptimizationScene.DrawSubmeshes = mOptimizationScene.CpuMesh.Submeshes;
 
 
-   
+    // Scene 4: PBR showcase model instead of generated shadow-test boxes.
     mShadowTestScene.ObjPath = exeDir + L"Models\\Cerberus.obj";
     mShadowTestScene.AssetDir = GetDirPart_RS(mShadowTestScene.ObjPath);
     mShadowTestScene.UseTessellation = false;
@@ -542,7 +542,8 @@ void RenderingSystem::BuildSceneGeometry()
     mShadowTestScene.NormalMapFlipY = 0.0f;
 
     XMStoreFloat4x4(&mShadowTestScene.World,
-        
+        // Cerberus OBJ is tiny after Blender export, so scale it up for the showcase.
+        // No -90 degree X rotation here: keep the gun readable horizontally.
         XMMatrixScaling(6.5f, 6.5f, 6.5f) *
         XMMatrixRotationY(0.0f) *
         XMMatrixTranslation(0.0f, 1.2f, 7.0f));
@@ -922,7 +923,8 @@ void RenderingSystem::BuildSceneTextures()
 
                 if (it == scene.CpuMesh.Materials.end() && scene.CpuMesh.Materials.size() == 1)
                 {
-                  
+                    // Robust fallback for exported OBJ files where usemtl name and .mtl newmtl name differ.
+                    // If there is only one material in the file, use it for all submeshes instead of white defaults.
                     it = scene.CpuMesh.Materials.begin();
                 }
 
@@ -935,7 +937,9 @@ void RenderingSystem::BuildSceneTextures()
                 std::wstring rough = tryResolveTexture(scene, mat.RoughnessMap);
                 std::wstring metal = tryResolveTexture(scene, mat.MetallicMap);
 
-                
+                // Hard fallback for the PBR homework showcase.
+                // Some Blender OBJ exports keep material names differently from the MTL file,
+                // so do not depend on MTL parsing for Cerberus: bind the known files directly.
                 if (scene.ObjPath.find(L"Cerberus.obj") != std::wstring::npos ||
                     scene.ObjPath.find(L"cerberus.obj") != std::wstring::npos)
                 {
@@ -1844,7 +1848,10 @@ void RenderingSystem::UpdateShadowCascades()
 {
     const float cameraNear = 0.1f;
 
-   
+    // Sponza is much less forgiving than the simple shadow-test scene:
+    // it has long walls/columns and many casters outside the currently visible camera frustum.
+    // A slightly longer distance and a more stable square ortho projection makes the shadows
+    // stop "swimming" and disappearing when the camera moves.
     const bool isSponza = (mMode == RenderMode::Sponza);
     const float shadowDistance = isSponza ? 160.0f : 120.0f;
     const float lambda = isSponza ? 0.50f : 0.55f;
@@ -1922,7 +1929,8 @@ void RenderingSystem::UpdateShadowCascades()
             radius = std::max(radius, XMVectorGetX(XMVector3Length(v)));
         }
 
-       
+        // Make the ortho box a stable square. This is less tight than min/max fitting,
+        // but it is much more stable on Sponza and avoids clipping columns/walls at cascade edges.
         radius = ceilf(radius);
         radius += isSponza ? 4.0f : 1.5f;
 
@@ -2022,6 +2030,7 @@ void RenderingSystem::UpdateLightCB(float totalTime)
 {
     mLightingData.EyePosW = mCameraPos;
     mLightingData.AmbientColor = { 0.22f, 0.22f, 0.24f };
+    mLightingData.UseBeckmann = mUseBeckmann ? 1 : 0;
 
 
     XMVECTOR sunDir = XMVector3Normalize(XMVectorSet(-0.05f, -1.0f, 0.03f, 0.0f));
@@ -2081,7 +2090,7 @@ void RenderingSystem::ResetCameraForMode(RenderMode mode)
         break;
 
     case RenderMode::ShadowTest:
-        
+        // PBR Cerberus showcase camera.
         mCameraPos = { 0.0f, 1.4f, -9.0f };
         mYaw = 0.0f;
         mPitch = 0.0f;
@@ -2216,6 +2225,12 @@ void RenderingSystem::Update(float totalTime, float deltaTime, const InputDevice
     if (input.WasKeyPressed('O'))
         mEnableOctree = !mEnableOctree;
 
+    if (input.WasKeyPressed('B'))
+    {
+        mUseBeckmann = !mUseBeckmann;
+        OutputDebugStringA(mUseBeckmann ? "NDF: Beckmann\n" : "NDF: GGX\n");
+    }
+
     UpdateObjectRotation(input);
     UpdateCamera(input, deltaTime);
 
@@ -2246,6 +2261,7 @@ void RenderingSystem::Update(float totalTime, float deltaTime, const InputDevice
 
         oss << " | frustum=" << (mEnableFrustumCulling ? "ON" : "OFF")
             << " | octree=" << (mEnableOctree ? "ON" : "OFF")
+            << " | NDF=" << (mUseBeckmann ? "Beckmann" : "GGX")
             << " | visible=" << mLastVisibleCount
             << " / total=" << mLastTotalCount;
 
