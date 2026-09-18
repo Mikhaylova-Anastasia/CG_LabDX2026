@@ -73,14 +73,15 @@ struct LightConstants
     DirectX::XMFLOAT4 CascadeSplits;
     DirectX::XMFLOAT2 ShadowMapSize;
     int UseBeckmann = 0;       // 0 = GGX, 1 = Beckmann
-    float pad2 = 0.0f;
+    float UsePlainBackground = 0.0f; // Reuses the final LightConstants padding slot.
 };
 enum class RenderMode
 {
     Sponza = 0,
     Tessellation = 1,
     Optimization = 2,
-    ShadowTest = 3
+    ShadowTest = 3,
+    Terrain = 4
 };
 
 struct SceneMesh
@@ -146,6 +147,17 @@ struct OctreeNode
     bool IsLeaf = true;
 };
 
+struct TerrainNode
+{
+    DirectX::XMFLOAT3 Center{};
+    DirectX::XMFLOAT3 Extents{};
+    float Width = 0.0f;
+    UINT Depth = 0;
+    std::array<int, 4> Children{ { -1, -1, -1, -1 } };
+    std::array<ObjSubmesh, 2> Parts{};
+    std::array<UINT, 2> TopIndexCounts{};
+};
+
 class RenderingSystem
 {
 public:
@@ -168,6 +180,9 @@ public:
 
 private:
     void BuildSceneGeometry();
+    void BuildTerrainGeometry();
+    void UpdateTerrainSelection();
+    void SelectTerrainNode(int index);
     void BuildSceneTextures();
     void BuildDescriptorHeaps();
     void BuildConstantBuffers();
@@ -279,6 +294,14 @@ private:
     SceneMesh mTessScene;
     SceneMesh mOptimizationScene;
     SceneMesh mShadowTestScene;
+    SceneMesh mTerrainScene;
+    std::vector<TerrainNode> mTerrainNodes;
+    std::vector<int> mTerrainSelected;
+    std::array<UINT, 2> mTerrainMaterialSrvs{};
+    bool mTerrainLod = true;
+    UINT mTerrainVisible = 0;
+    UINT mTerrainTriangles = 0;
+    std::array<UINT, 5> mTerrainDepthCounts{};
 
     RenderMode mMode = RenderMode::Sponza;
 

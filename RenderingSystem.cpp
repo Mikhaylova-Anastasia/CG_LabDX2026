@@ -5,6 +5,7 @@
 #include <cmath>
 #include <random>
 #include <cfloat>
+#include <functional>
 
 #ifdef min
 #undef min
@@ -556,6 +557,8 @@ void RenderingSystem::BuildSceneGeometry()
 
     mShadowTestScene.DrawSubmeshes = mShadowTestScene.CpuMesh.Submeshes;
 
+    BuildTerrainGeometry();
+
     auto buildGpuBuffers = [&](SceneMesh& scene)
         {
             const UINT vbSize = (UINT)(scene.CpuMesh.Vertices.size() * sizeof(VertexPosNormalTangentTex));
@@ -608,9 +611,245 @@ void RenderingSystem::BuildSceneGeometry()
     buildGpuBuffers(mTessScene);
     buildGpuBuffers(mOptimizationScene);
     buildGpuBuffers(mShadowTestScene);
+    buildGpuBuffers(mTerrainScene);
 
     BuildOptimizationSceneObjects();
     BuildOptimizationOctree();
+}
+
+// Read the height samples directly: converting to RGBA8 would lose precision.
+static std::vector<uint16_t> LoadTerrainHeightmap_RS(const std::wstring& path, UINT expectedSize)
+{
+    ComPtr<IWICImagingFactory> factory;
+    ThrowIfFailed(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+        IID_PPV_ARGS(&factory)));
+    ComPtr<IWICBitmapDecoder> decoder;
+    HRESULT hr = factory->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ,
+        WICDecodeMetadataCacheOnLoad, &decoder);
+    if (FAILED(hr))
+    {
+        MessageBoxW(nullptr, path.c_str(), L"Cannot open terrain tile: check this path", MB_OK | MB_ICONERROR);
+        ThrowIfFailed(hr);
+    }
+    ComPtr<IWICBitmapFrameDecode> frame;
+    ThrowIfFailed(decoder->GetFrame(0, &frame));
+    UINT width = 0, height = 0;
+    ThrowIfFailed(frame->GetSize(&width, &height));
+    WICPixelFormatGUID format{};
+    ThrowIfFailed(frame->GetPixelFormat(&format));
+    if (width != expectedSize || height != expectedSize || !IsEqualGUID(format, GUID_WICPixelFormat16bppGray))
+        throw std::runtime_error("Terrain tiles must be 257x257 16-bit grayscale PNG files.");
+
+    std::vector<uint16_t> samples((size_t)width * height);
+    const UINT stride = width * sizeof(uint16_t);
+    ThrowIfFailed(frame->CopyPixels(nullptr, stride, stride * height,
+        reinterpret_cast<BYTE*>(samples.data())));
+    return samples;
+}
+
+static std::vector<uint16_t> LoadTerrainTiles_RS(const std::wstring& directory)
+{
+    constexpr UINT tileCells = 256;
+    constexpr UINT tileSize = tileCells + 1;
+    constexpr UINT fullSize = tileCells * 2 + 1;
+    std::vector<uint16_t> samples(fullSize * fullSize);
+    std::vector<uint8_t> assigned(fullSize * fullSize, 0);
+    for (UINT tz = 0; tz < 2; ++tz)
+        for (UINT tx = 0; tx < 2; ++tx)
+        {
+            const std::wstring path = directory + L"height_" + std::to_wstring(tx)
+                + L"_" + std::to_wstring(tz) + L".png";
+            const auto tile = LoadTerrainHeightmap_RS(path, tileSize);
+            for (UINT z = 0; z < tileSize; ++z)
+                for (UINT x = 0; x < tileSize; ++x)
+                {
+                    const size_t dest = (size_t)(tz * tileCells + z) * fullSize + tx * tileCells + x;
+                    const uint16_t height = tile[(size_t)z * tileSize + x];
+                    if (assigned[dest] && samples[dest] != height)
+                        throw std::runtime_error("Terrain tile edges do not match. Use tiles exported together without separate normalization.");
+                    samples[dest] = height;
+                    assigned[dest] = 1;
+                }
+        }
+    return samples;
+}
+
+void RenderingSystem::BuildTerrainGeometry()
+{
+    
+    constexpr UINT cells = 512;
+    constexpr UINT rowSize = cells + 1;
+    constexpr float cellSize = 0.5f;
+    constexpr float heightScale = 70.0f;
+    constexpr float halfSize = cells * cellSize * 0.5f;
+
+    const auto heightSamples = LoadTerrainTiles_RS(GetExeDir_RS() + L"Models\\Terrain\\");
+    auto heightAt = [&](UINT x, UINT z) -> float
+        {
+            return (float)heightSamples[(size_t)z * rowSize + x] * (heightScale / 65535.0f);
+        };
+
+    mTerrainScene.CpuMesh = ObjMeshData{};
+    mTerrainScene.UseTessellation = false;
+    mTerrainScene.DisplacementScale = 0.0f;
+    XMStoreFloat4x4(&mTerrainScene.World, XMMatrixIdentity());
+
+    auto& mesh = mTerrainScene.CpuMesh;
+    mesh.Vertices.reserve(rowSize * rowSize);
+    mesh.Indices.reserve(cells * cells * 6);
+
+    for (UINT z = 0; z <= cells; ++z)
+    {
+        for (UINT x = 0; x <= cells; ++x)
+        {
+            VertexPosNormalTangentTex vertex{};
+            vertex.Pos = XMFLOAT3(x * cellSize - halfSize, heightAt(x, z), z * cellSize - halfSize);
+            const UINT left = x > 0 ? x - 1 : x;
+            const UINT right = x < cells ? x + 1 : x;
+            const UINT back = z > 0 ? z - 1 : z;
+            const UINT front = z < cells ? z + 1 : z;
+            const float dhdx = (heightAt(right, z) - heightAt(left, z)) / ((right - left) * cellSize);
+            const float dhdz = (heightAt(x, front) - heightAt(x, back)) / ((front - back) * cellSize);
+            XMVECTOR normal = XMVector3Normalize(XMVectorSet(-dhdx, 1.0f, -dhdz, 0.0f));
+            XMVECTOR tangent = XMVector3Normalize(XMVectorSet(1.0f, dhdx, 0.0f, 0.0f));
+            XMVECTOR bitangent = XMVector3Normalize(XMVector3Cross(tangent, normal));
+            XMStoreFloat3(&vertex.Normal, normal);
+            XMStoreFloat3(&vertex.Tangent, tangent);
+            XMStoreFloat3(&vertex.Bitangent, bitangent);
+            vertex.TexC = XMFLOAT2((float)x / cells, (float)z / cells);
+            mesh.Vertices.push_back(vertex);
+        }
+    }
+
+    
+    const auto source = std::move(mesh.Vertices);
+    mesh.Vertices.clear();
+    mesh.Indices.clear();
+    mesh.Submeshes.clear();
+    mTerrainNodes.clear();
+    constexpr UINT patchCells = 32;
+    constexpr UINT patchRow = patchCells + 1;
+    constexpr float skirtDepth = heightScale + 1.0f;
+
+    std::function<int(UINT, UINT, UINT, UINT)> buildNode;
+    buildNode = [&](UINT ox, UINT oz, UINT span, UINT depth) -> int
+        {
+            const int id = (int)mTerrainNodes.size();
+            mTerrainNodes.emplace_back();
+            TerrainNode node;
+            node.Depth = depth;
+            node.Width = span * cellSize;
+            float minY = FLT_MAX, maxY = -FLT_MAX;
+            
+            for (UINT z = oz; z <= oz + span; ++z)
+                for (UINT x = ox; x <= ox + span; ++x)
+                {
+                    const float y = source[(size_t)z * rowSize + x].Pos.y;
+                    minY = std::min(minY, y);
+                    maxY = std::max(maxY, y);
+                }
+            minY -= skirtDepth;
+            node.Center = XMFLOAT3((ox + span * 0.5f) * cellSize - halfSize,
+                (minY + maxY) * 0.5f, (oz + span * 0.5f) * cellSize - halfSize);
+            node.Extents = XMFLOAT3(node.Width * 0.5f, (maxY - minY) * 0.5f, node.Width * 0.5f);
+            const UINT step = span / patchCells;
+            const uint32_t base = (uint32_t)mesh.Vertices.size();
+            for (UINT z = 0; z <= patchCells; ++z)
+                for (UINT x = 0; x <= patchCells; ++x)
+                    mesh.Vertices.push_back(source[(size_t)(oz + z * step) * rowSize + ox + x * step]);
+
+            
+            std::array<std::vector<uint32_t>, 4> edges;
+            for (UINT i = 0; i <= patchCells; ++i)
+            {
+                edges[0].push_back(base + i);
+                edges[1].push_back(base + patchCells * patchRow + i);
+                edges[2].push_back(base + i * patchRow);
+                edges[3].push_back(base + i * patchRow + patchCells);
+            }
+            std::array<uint32_t, 4> bottom{};
+            for (UINT e = 0; e < 4; ++e)
+            {
+                bottom[e] = (uint32_t)mesh.Vertices.size();
+                for (uint32_t top : edges[e])
+                {
+                    auto v = mesh.Vertices[top];
+                    v.Pos.y -= skirtDepth;
+                    mesh.Vertices.push_back(v);
+                }
+            }
+            for (UINT color = 0; color < 2; ++color)
+            {
+                auto& part = node.Parts[color];
+                part.StartIndex = (uint32_t)mesh.Indices.size();
+                for (UINT z = 0; z < patchCells; ++z)
+                    for (UINT x = 0; x < patchCells; ++x)
+                    {
+                        if ((((ox + x * step) / 32 + (oz + z * step) / 32) % 2) != color) continue;
+                        const uint32_t a = base + z * patchRow + x;
+                        const uint32_t b = a + 1, c = a + patchRow, d = c + 1;
+                        mesh.Indices.insert(mesh.Indices.end(), { a, c, b, b, c, d });
+                    }
+                node.TopIndexCounts[color] = (UINT)mesh.Indices.size() - part.StartIndex;
+                if (color == 0)
+                    for (UINT e = 0; e < 4; ++e)
+                        for (UINT i = 0; i < patchCells; ++i)
+                        {
+                            uint32_t a = edges[e][i], b = edges[e][i + 1];
+                            uint32_t c = bottom[e] + i, d = c + 1;
+                            mesh.Indices.insert(mesh.Indices.end(), { a, c, b, b, c, d });
+                        }
+                part.IndexCount = (uint32_t)mesh.Indices.size() - part.StartIndex;
+            }
+            if (span > patchCells)
+                for (UINT child = 0; child < 4; ++child)
+                    node.Children[child] = buildNode(ox + (child % 2) * (span / 2),
+                        oz + (child / 2) * (span / 2), span / 2, depth + 1);
+            mTerrainNodes[id] = node;
+            return id;
+        };
+    buildNode(0, 0, cells, 0);
+    mTerrainScene.DrawSubmeshes.clear();
+}
+
+void RenderingSystem::SelectTerrainNode(int index)
+{
+    const auto& node = mTerrainNodes[index];
+    const float dx = std::max(0.0f, fabsf(mCameraPos.x - node.Center.x) - node.Extents.x);
+    const float dy = std::max(0.0f, fabsf(mCameraPos.y - node.Center.y) - node.Extents.y);
+    const float dz = std::max(0.0f, fabsf(mCameraPos.z - node.Center.z) - node.Extents.z);
+    const float threshold = node.Width * 1.5f;
+    const bool split = node.Children[0] >= 0 &&
+        (!mTerrainLod || dx * dx + dy * dy + dz * dz < threshold * threshold);
+    if (split)
+        for (int child : node.Children) SelectTerrainNode(child);
+    else
+        mTerrainSelected.push_back(index);
+}
+
+void RenderingSystem::UpdateTerrainSelection()
+{
+    mTerrainSelected.clear();
+    if (!mTerrainNodes.empty()) SelectTerrainNode(0);
+    mTerrainScene.DrawSubmeshes.clear();
+    mTerrainScene.SubmeshBaseSrv.clear();
+    mTerrainVisible = mTerrainTriangles = 0;
+    mTerrainDepthCounts.fill(0);
+    const auto planes = ExtractFrustumPlanes(GetViewProjMatrix());
+    for (int index : mTerrainSelected)
+    {
+        const auto& node = mTerrainNodes[index];
+        if (mEnableFrustumCulling && !AabbInsideFrustum(node.Center, node.Extents, planes)) continue;
+        ++mTerrainVisible;
+        ++mTerrainDepthCounts[node.Depth];
+        for (UINT color = 0; color < 2; ++color)
+        {
+            if (node.Parts[color].IndexCount == 0) continue;
+            mTerrainScene.DrawSubmeshes.push_back(node.Parts[color]);
+            mTerrainScene.SubmeshBaseSrv.push_back(mTerrainMaterialSrvs[color]);
+            mTerrainTriangles += node.Parts[color].IndexCount / 3;
+        }
+    }
 }
 
 void RenderingSystem::BuildOptimizationSceneObjects()
@@ -923,8 +1162,7 @@ void RenderingSystem::BuildSceneTextures()
 
                 if (it == scene.CpuMesh.Materials.end() && scene.CpuMesh.Materials.size() == 1)
                 {
-                    // Robust fallback for exported OBJ files where usemtl name and .mtl newmtl name differ.
-                    // If there is only one material in the file, use it for all submeshes instead of white defaults.
+                    
                     it = scene.CpuMesh.Materials.begin();
                 }
 
@@ -937,9 +1175,7 @@ void RenderingSystem::BuildSceneTextures()
                 std::wstring rough = tryResolveTexture(scene, mat.RoughnessMap);
                 std::wstring metal = tryResolveTexture(scene, mat.MetallicMap);
 
-                // Hard fallback for the PBR homework showcase.
-                // Some Blender OBJ exports keep material names differently from the MTL file,
-                // so do not depend on MTL parsing for Cerberus: bind the known files directly.
+                
                 if (scene.ObjPath.find(L"Cerberus.obj") != std::wstring::npos ||
                     scene.ObjPath.find(L"cerberus.obj") != std::wstring::npos)
                 {
@@ -1001,6 +1237,22 @@ void RenderingSystem::BuildSceneTextures()
             mOptimizationScene.SubmeshBaseSrv.push_back(base);
         }
     }
+
+    // Five consecutive SRVs per material, matching the existing G-buffer shaders.
+    mTerrainScene.SubmeshBaseSrv.clear();
+    const UINT terrainColors[] = { 0xFF8EAD68u, 0xFF46643Bu };
+    for (UINT color : terrainColors)
+    {
+        mTerrainScene.SubmeshBaseSrv.push_back((UINT)mTextures.size());
+        addTex(L"", color);          // t0: albedo
+        addTex(L"", 0xFF8080FFu);    // t1: flat tangent-space normal
+        addTex(L"", 0xFF000000u);    // t2: zero displacement
+        addTex(L"", 0xFFE6E6E6u);    // t3: rough surface
+        addTex(L"", 0xFF000000u);    // t4: non-metallic
+    }
+
+    for (UINT color = 0; color < 2; ++color)
+        mTerrainMaterialSrvs[color] = mTerrainScene.SubmeshBaseSrv[color];
 
     mModelTextureCount = (UINT)mTextures.size();
     mGBufferSrvStartIndex = mModelTextureCount;
@@ -1738,7 +1990,7 @@ XMFLOAT3 RenderingSystem::GetCameraPosition() const
 
 void RenderingSystem::UpdateCamera(const InputDevice& input, float dt)
 {
-    const float moveSpeed = 10.0f;
+    const float moveSpeed = (mMode == RenderMode::Terrain) ? 30.0f : 10.0f;
     const float mouseSens = 0.0025f;
 
     if (input.IsMouseDown(1))
@@ -1848,10 +2100,6 @@ void RenderingSystem::UpdateShadowCascades()
 {
     const float cameraNear = 0.1f;
 
-    // Sponza is much less forgiving than the simple shadow-test scene:
-    // it has long walls/columns and many casters outside the currently visible camera frustum.
-    // A slightly longer distance and a more stable square ortho projection makes the shadows
-    // stop "swimming" and disappearing when the camera moves.
     const bool isSponza = (mMode == RenderMode::Sponza);
     const float shadowDistance = isSponza ? 160.0f : 120.0f;
     const float lambda = isSponza ? 0.50f : 0.55f;
@@ -1929,8 +2177,7 @@ void RenderingSystem::UpdateShadowCascades()
             radius = std::max(radius, XMVectorGetX(XMVector3Length(v)));
         }
 
-        // Make the ortho box a stable square. This is less tight than min/max fitting,
-        // but it is much more stable on Sponza and avoids clipping columns/walls at cascade edges.
+        
         radius = ceilf(radius);
         radius += isSponza ? 4.0f : 1.5f;
 
@@ -2031,6 +2278,7 @@ void RenderingSystem::UpdateLightCB(float totalTime)
     mLightingData.EyePosW = mCameraPos;
     mLightingData.AmbientColor = { 0.22f, 0.22f, 0.24f };
     mLightingData.UseBeckmann = mUseBeckmann ? 1 : 0;
+    mLightingData.UsePlainBackground = (mMode == RenderMode::Terrain) ? 1.0f : 0.0f;
 
 
     XMVECTOR sunDir = XMVector3Normalize(XMVectorSet(-0.05f, -1.0f, 0.03f, 0.0f));
@@ -2094,6 +2342,12 @@ void RenderingSystem::ResetCameraForMode(RenderMode mode)
         mCameraPos = { 0.0f, 1.4f, -9.0f };
         mYaw = 0.0f;
         mPitch = 0.0f;
+        break;
+
+    case RenderMode::Terrain:
+        mCameraPos = { 0.0f, 160.0f, -240.0f };
+        mYaw = 0.0f;
+        mPitch = -0.46f;
         break;
     }
 }
@@ -2219,8 +2473,17 @@ void RenderingSystem::Update(float totalTime, float deltaTime, const InputDevice
         ResetCameraForMode(mMode);
     }
 
+    if (input.WasKeyPressed('5'))
+    {
+        mMode = RenderMode::Terrain;
+        ResetCameraForMode(mMode);
+    }
+
     if (input.WasKeyPressed('F'))
         mEnableFrustumCulling = !mEnableFrustumCulling;
+
+    if (mMode == RenderMode::Terrain && input.WasKeyPressed('L'))
+        mTerrainLod = !mTerrainLod;
 
     if (input.WasKeyPressed('O'))
         mEnableOctree = !mEnableOctree;
@@ -2244,6 +2507,11 @@ void RenderingSystem::Update(float totalTime, float deltaTime, const InputDevice
         UpdateOptimizationSceneAnimation(deltaTime);
     else if (mMode == RenderMode::ShadowTest)
         UpdateGeometryCB(mShadowTestScene);
+    else if (mMode == RenderMode::Terrain)
+    {
+        UpdateGeometryCB(mTerrainScene);
+        UpdateTerrainSelection();
+    }
 
     UpdateLightCB(totalTime);
 
@@ -2257,7 +2525,21 @@ void RenderingSystem::Update(float totalTime, float deltaTime, const InputDevice
         if (mMode == RenderMode::Sponza) oss << "Sponza";
         else if (mMode == RenderMode::Tessellation) oss << "Tessellation";
         else if (mMode == RenderMode::Optimization) oss << "Optimization";
-        else oss << "ShadowTest";
+        else if (mMode == RenderMode::ShadowTest) oss << "ShadowTest";
+        else oss << "Terrain";
+
+        if (mMode == RenderMode::Terrain)
+        {
+            oss << " | heightTiles=2x2 | LOD=" << (mTerrainLod ? "ON" : "OFF (full detail)")
+                << " | culling=" << (mEnableFrustumCulling ? "ON" : "OFF")
+                << " | patches=" << mTerrainVisible << "/" << mTerrainSelected.size()
+                << " | triangles(with skirts)=" << mTerrainTriangles
+                << " | depth[0=coarse..4=fine]=";
+            for (UINT count : mTerrainDepthCounts) oss << count << " ";
+            oss << "\n";
+            OutputDebugStringA(oss.str().c_str());
+            return;
+        }
 
         oss << " | frustum=" << (mEnableFrustumCulling ? "ON" : "OFF")
             << " | octree=" << (mEnableOctree ? "ON" : "OFF")
@@ -2428,6 +2710,20 @@ void RenderingSystem::DrawSceneIntoShadowMap(
         0,
         mShadowGeometryCB->GetGPUVirtualAddress() + (UINT64)cbIndex * mGeometryCBByteSize);
 
+    if (mMode == RenderMode::Terrain)
+    {
+        
+        for (int index : mTerrainSelected)
+            for (UINT color = 0; color < 2; ++color)
+            {
+                const auto& node = mTerrainNodes[index];
+                if (node.TopIndexCounts[color] > 0)
+                    cmdList->DrawIndexedInstanced(node.TopIndexCounts[color], 1,
+                        node.Parts[color].StartIndex, 0, 0);
+            }
+        return;
+    }
+
     for (const ObjSubmesh& sm : scene.DrawSubmeshes)
     {
         cmdList->DrawIndexedInstanced(
@@ -2522,6 +2818,10 @@ void RenderingSystem::DrawShadowPass(ID3D12GraphicsCommandList* cmdList)
         case RenderMode::ShadowTest:
             DrawSceneIntoShadowMap(cmdList, mShadowTestScene, lightViewProj, cascade);
             break;
+
+        case RenderMode::Terrain:
+            DrawSceneIntoShadowMap(cmdList, mTerrainScene, lightViewProj, cascade);
+            break;
         }
     }
 
@@ -2590,6 +2890,11 @@ void RenderingSystem::Draw(
     case RenderMode::ShadowTest:
         UpdateGeometryCB(mShadowTestScene);
         DrawSceneGeometryPass(cmdList, mShadowTestScene, depthDsv);
+        break;
+
+    case RenderMode::Terrain:
+        UpdateGeometryCB(mTerrainScene);
+        DrawSceneGeometryPass(cmdList, mTerrainScene, depthDsv);
         break;
     }
 
