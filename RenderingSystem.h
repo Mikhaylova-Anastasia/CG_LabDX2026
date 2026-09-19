@@ -7,6 +7,7 @@
 #include <array>
 #include <memory>
 #include <vector>
+#include <cstddef>
 
 struct GeometryConstants
 {
@@ -20,8 +21,15 @@ struct GeometryConstants
     float               TessMaxDistance = 8.0f;
     float               DisplacementScale = 0.05f;
     float               NormalMapFlipY = 0.0f;
-    DirectX::XMFLOAT3   pad0{};
+    float               TerrainPaintEnabled = 0.0f;
+    DirectX::XMFLOAT3   PaintPadding{};
+    DirectX::XMFLOAT4   PaintBrush{}; // UV center, UV radius, preview enabled.
 };
+
+// Keep the CPU layout identical to GeometryCB in GBufferPS.hlsl.
+static_assert(offsetof(GeometryConstants, TerrainPaintEnabled) == 176, "GeometryCB paint flag layout mismatch");
+static_assert(offsetof(GeometryConstants, PaintBrush) == 192, "GeometryCB brush layout mismatch");
+static_assert(sizeof(GeometryConstants) == 208, "GeometryCB size mismatch");
 
 struct DirectionalLightGPU
 {
@@ -183,6 +191,12 @@ private:
     void BuildTerrainGeometry();
     void UpdateTerrainSelection();
     void SelectTerrainNode(int index);
+    void BuildTerrainPaintResources();
+    void UploadTerrainPaint(ID3D12GraphicsCommandList* cmdList);
+    void BindTerrainPaint(ID3D12GraphicsCommandList* cmdList);
+    bool PickTerrain(const POINT& mouse, DirectX::XMFLOAT2& uv) const;
+    void UpdateTerrainBrush(const InputDevice& input);
+    void PaintTerrainStroke(const DirectX::XMFLOAT2& from, const DirectX::XMFLOAT2& to);
     void BuildSceneTextures();
     void BuildDescriptorHeaps();
     void BuildConstantBuffers();
@@ -298,6 +312,18 @@ private:
     std::vector<TerrainNode> mTerrainNodes;
     std::vector<int> mTerrainSelected;
     std::array<UINT, 2> mTerrainMaterialSrvs{};
+    // CPU mask is independent of quadtree LOD. Only dirty masks are uploaded.
+    static constexpr UINT TerrainPaintSize = 513;
+    std::vector<uint8_t> mTerrainPaintPixels;
+    Microsoft::WRL::ComPtr<ID3D12Resource> mTerrainPaintTexture;
+    Microsoft::WRL::ComPtr<ID3D12Resource> mTerrainPaintUpload;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT mTerrainPaintFootprint{};
+    UINT mTerrainPaintSrvIndex = 0;
+    bool mTerrainPaintDirty = false;
+    bool mTerrainBrushStroke = false;
+    float mTerrainBrushRadius = 3.0f; // Terrain units, adjusted with +/-.
+    DirectX::XMFLOAT2 mTerrainLastPaintUV{};
+    DirectX::XMFLOAT4 mTerrainBrushPreview{};
     bool mTerrainLod = true;
     UINT mTerrainVisible = 0;
     UINT mTerrainTriangles = 0;

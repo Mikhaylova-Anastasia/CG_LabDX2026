@@ -18,6 +18,154 @@
 using namespace DirectX;
 using Microsoft::WRL::ComPtr;
 
+// Compile the paint-aware pixel shader from this translation unit. This avoids
+// silently using an old Shaders/GBufferPS.hlsl in the debugger's output directory.
+// Edit this string when changing the geometry pixel shader in this lab version.
+static const char TerrainGBufferPS_RS[] = R"TERRAIN_PS(
+Texture2D gDiffuseMap : register(t0);
+Texture2D gNormalMap : register(t1);
+Texture2D gDisplacementMap : register(t2);
+Texture2D gRoughnessMap : register(t3);
+Texture2D gMetallicMap : register(t4);
+SamplerState gSam : register(s0);
+Texture2D gTerrainPaintMask : register(t5);
+SamplerState gPaintSam : register(s1);
+
+cbuffer GeometryCB : register(b0)
+{
+    float4x4 gWorld;
+    float4x4 gViewProj;
+    float2 gTiling;
+    float2 gUVOffset;
+    float3 gEyePosW;
+    float gTessMin;
+    float gTessMax;
+    float gTessMaxDistance;
+    float gDisplacementScale;
+    float gNormalMapFlipY;
+    float gTerrainPaintEnabled;
+    float3 gPaintPadding;
+    float4 gPaintBrush; // UV center, UV radius, preview enabled.
+};
+
+struct PSInput
+{
+    float4 PosH : SV_POSITION;
+    float3 PosW : TEXCOORD0;
+    float3 NormalW : TEXCOORD1;
+    float3 TangentW : TEXCOORD2;
+    float3 BitangentW : TEXCOORD3;
+    float2 Tex : TEXCOORD4;
+};
+
+struct PSOutput
+{
+    float4 Albedo : SV_Target0;
+    float4 Normal : SV_Target1;
+    float4 Position : SV_Target2;
+};
+
+float3 SafeNormalize(float3 v)
+{
+    float len2 = dot(v, v);
+    if (len2 < 1e-8f)
+        return float3(0.0f, 0.0f, 1.0f);
+    return v * rsqrt(len2);
+}
+
+PSOutput PSMain(PSInput pin)
+{
+    PSOutput o;
+
+    float3 albedo = gDiffuseMap.Sample(gSam, pin.Tex).rgb;
+    float roughness = gRoughnessMap.Sample(gSam, pin.Tex).r;
+    float metallic = gMetallicMap.Sample(gSam, pin.Tex).r;
+
+    if (gTerrainPaintEnabled > 0.5f)
+    {
+        float paint = gTerrainPaintMask.Sample(gPaintSam, saturate(pin.Tex)).r;
+        albedo = lerp(albedo, float3(0.015f, 0.10f, 0.95f), paint);
+        roughness = lerp(roughness, 0.85f, paint);
+        metallic = lerp(metallic, 0.0f, paint);
+
+        // A temporary outline shows the brush footprint; it is not stored in the mask.
+        if (gPaintBrush.w > 0.5f)
+        {
+            float distanceUV = length(pin.Tex - gPaintBrush.xy);
+            float lineWidth = max(fwidth(distanceUV) * 1.5f, 0.0005f);
+            float ring = 1.0f - smoothstep(lineWidth, lineWidth * 2.0f,
+                abs(distanceUV - gPaintBrush.z));
+            albedo = lerp(albedo, float3(0.6f, 0.85f, 1.0f), ring);
+        }
+    }
+
+    float3 N = SafeNormalize(pin.NormalW);
+    float3 T = SafeNormalize(pin.TangentW);
+    float3 B = SafeNormalize(pin.BitangentW);
+
+    float3 normalTS = gNormalMap.Sample(gSam, pin.Tex).xyz * 2.0f - 1.0f;
+    if (gNormalMapFlipY > 0.5f)
+        normalTS.y = -normalTS.y;
+
+    float3 normalW = SafeNormalize(normalTS.x * T + normalTS.y * B + normalTS.z * N);
+
+  
+    o.Albedo = float4(albedo, roughness);
+    o.Normal = float4(normalW * 0.5f + 0.5f, metallic);
+    o.Position = float4(pin.PosW, 1.0f);
+    return o;
+}
+)TERRAIN_PS";
+
+// Ray tests are two-sided, matching the terrain's CULL_MODE_NONE.
+static bool TerrainRayBox_RS(const XMFLOAT3& origin, const XMFLOAT3& direction,
+    const XMFLOAT3& center, const XMFLOAT3& extents, float maxDistance)
+{
+    const float o[] = { origin.x, origin.y, origin.z };
+    const float d[] = { direction.x, direction.y, direction.z };
+    const float c[] = { center.x, center.y, center.z };
+    const float e[] = { extents.x, extents.y, extents.z };
+    float enter = 0.0f, leave = maxDistance;
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        if (fabsf(d[axis]) < 1e-8f)
+        {
+            if (o[axis] < c[axis] - e[axis] || o[axis] > c[axis] + e[axis]) return false;
+            continue;
+        }
+        float a = (c[axis] - e[axis] - o[axis]) / d[axis];
+        float b = (c[axis] + e[axis] - o[axis]) / d[axis];
+        if (a > b) std::swap(a, b);
+        enter = std::max(enter, a);
+        leave = std::min(leave, b);
+        if (enter > leave) return false;
+    }
+    return true;
+}
+
+static bool TerrainRayTriangle_RS(const XMFLOAT3& origin, const XMFLOAT3& direction,
+    const XMFLOAT3& a, const XMFLOAT3& b, const XMFLOAT3& c,
+    float& distance, float& u, float& v)
+{
+    const XMFLOAT3 e1(b.x - a.x, b.y - a.y, b.z - a.z);
+    const XMFLOAT3 e2(c.x - a.x, c.y - a.y, c.z - a.z);
+    const XMFLOAT3 p(direction.y * e2.z - direction.z * e2.y,
+        direction.z * e2.x - direction.x * e2.z,
+        direction.x * e2.y - direction.y * e2.x);
+    const float det = e1.x * p.x + e1.y * p.y + e1.z * p.z;
+    if (fabsf(det) < 1e-8f) return false;
+    const float invDet = 1.0f / det;
+    const XMFLOAT3 t(origin.x - a.x, origin.y - a.y, origin.z - a.z);
+    u = (t.x * p.x + t.y * p.y + t.z * p.z) * invDet;
+    if (u < -1e-5f || u > 1.00001f) return false;
+    const XMFLOAT3 q(t.y * e1.z - t.z * e1.y,
+        t.z * e1.x - t.x * e1.z, t.x * e1.y - t.y * e1.x);
+    v = (direction.x * q.x + direction.y * q.y + direction.z * q.z) * invDet;
+    if (v < -1e-5f || u + v > 1.00001f) return false;
+    distance = (e2.x * q.x + e2.y * q.y + e2.z * q.z) * invDet;
+    return distance >= 0.0f;
+}
+
 static UINT AlignCB_RS(UINT size)
 {
     return (size + 255) & ~255;
@@ -444,6 +592,7 @@ void RenderingSystem::BuildResources()
         mCbvSrvUavDescriptorSize);
 
     BuildDescriptorHeaps();
+    BuildTerrainPaintResources();
     BuildShadowResources();
     BuildConstantBuffers();
     BuildRootSignatures();
@@ -647,6 +796,9 @@ static std::vector<uint16_t> LoadTerrainHeightmap_RS(const std::wstring& path, U
     return samples;
 }
 
+// Four 257x257 tiles cover 512x512 cells. Adjacent tiles share one row/column.
+// Reconstruct CPU samples so the existing quadtree and normal calculations
+// use identical heights on both sides of every tile boundary.
 static std::vector<uint16_t> LoadTerrainTiles_RS(const std::wstring& directory)
 {
     constexpr UINT tileCells = 256;
@@ -676,7 +828,7 @@ static std::vector<uint16_t> LoadTerrainTiles_RS(const std::wstring& directory)
 
 void RenderingSystem::BuildTerrainGeometry()
 {
-    
+    // Load tiled height data, calculate shared normals, and build the LOD quadtree.
     constexpr UINT cells = 512;
     constexpr UINT rowSize = cells + 1;
     constexpr float cellSize = 0.5f;
@@ -721,7 +873,8 @@ void RenderingSystem::BuildTerrainGeometry()
         }
     }
 
-    
+    // Each quadtree node covers a different area with the same 32x32 grid.
+    // All LODs sample the original heightmap at shared integer coordinates.
     const auto source = std::move(mesh.Vertices);
     mesh.Vertices.clear();
     mesh.Indices.clear();
@@ -740,7 +893,7 @@ void RenderingSystem::BuildTerrainGeometry()
             node.Depth = depth;
             node.Width = span * cellSize;
             float minY = FLT_MAX, maxY = -FLT_MAX;
-            
+            // Bounds include ALL source samples, not only the coarse LOD vertices.
             for (UINT z = oz; z <= oz + span; ++z)
                 for (UINT x = ox; x <= ox + span; ++x)
                 {
@@ -758,7 +911,7 @@ void RenderingSystem::BuildTerrainGeometry()
                 for (UINT x = 0; x <= patchCells; ++x)
                     mesh.Vertices.push_back(source[(size_t)(oz + z * step) * rowSize + ox + x * step]);
 
-            
+            // Four downward curtains cover the gaps between adjacent LODs.
             std::array<std::vector<uint32_t>, 4> edges;
             for (UINT i = 0; i <= patchCells; ++i)
             {
@@ -825,6 +978,245 @@ void RenderingSystem::SelectTerrainNode(int index)
         for (int child : node.Children) SelectTerrainNode(child);
     else
         mTerrainSelected.push_back(index);
+}
+
+// The paint mask uses the same continuous UV coordinates as all quadtree levels.
+// It is independent of the heightmap, so painting never changes the terrain shape.
+void RenderingSystem::BuildTerrainPaintResources()
+{
+    mTerrainPaintPixels.assign(TerrainPaintSize * TerrainPaintSize, 0);
+    auto desc = CD3DX12_RESOURCE_DESC::Tex2D(DXGI_FORMAT_R8_UNORM,
+        TerrainPaintSize, TerrainPaintSize, 1, 1);
+    CD3DX12_HEAP_PROPERTIES defaultHeap(D3D12_HEAP_TYPE_DEFAULT);
+    ThrowIfFailed(mDevice->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE,
+        &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&mTerrainPaintTexture)));
+
+    UINT64 uploadSize = 0;
+    mDevice->GetCopyableFootprints(&desc, 0, 1, 0, &mTerrainPaintFootprint,
+        nullptr, nullptr, &uploadSize);
+    auto uploadDesc = CD3DX12_RESOURCE_DESC::Buffer(uploadSize);
+    CD3DX12_HEAP_PROPERTIES uploadHeap(D3D12_HEAP_TYPE_UPLOAD);
+    ThrowIfFailed(mDevice->CreateCommittedResource(&uploadHeap, D3D12_HEAP_FLAG_NONE,
+        &uploadDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&mTerrainPaintUpload)));
+
+    D3D12_SUBRESOURCE_DATA data{};
+    data.pData = mTerrainPaintPixels.data();
+    data.RowPitch = TerrainPaintSize;
+    data.SlicePitch = TerrainPaintSize * TerrainPaintSize;
+    UpdateSubresources(mInitCmdList, mTerrainPaintTexture.Get(), mTerrainPaintUpload.Get(),
+        0, 0, 1, &data);
+    auto barrier = CD3DX12_RESOURCE_BARRIER::Transition(mTerrainPaintTexture.Get(),
+        D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    mInitCmdList->ResourceBarrier(1, &barrier);
+    CreateTextureSrv(mTerrainPaintSrvIndex, mTerrainPaintTexture.Get());
+    mTerrainPaintDirty = false;
+}
+
+void RenderingSystem::UploadTerrainPaint(ID3D12GraphicsCommandList* cmdList)
+{
+    if (!mTerrainPaintDirty) return;
+
+    // CubeApp::Draw waits with FlushCommandQueue every frame. The previous GPU
+    // copy has therefore finished before we reuse this upload buffer.
+    // If frames in flight are introduced, use a fenced upload buffer per frame.
+    BYTE* mapped = nullptr;
+    D3D12_RANGE noRead{ 0, 0 };
+    ThrowIfFailed(mTerrainPaintUpload->Map(0, &noRead, reinterpret_cast<void**>(&mapped)));
+    for (UINT y = 0; y < TerrainPaintSize; ++y)
+        memcpy(mapped + mTerrainPaintFootprint.Offset + (size_t)y * mTerrainPaintFootprint.Footprint.RowPitch,
+            mTerrainPaintPixels.data() + (size_t)y * TerrainPaintSize, TerrainPaintSize);
+    mTerrainPaintUpload->Unmap(0, nullptr);
+
+    auto barrier = CD3DX12_RESOURCE_BARRIER::Transition(mTerrainPaintTexture.Get(),
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+    cmdList->ResourceBarrier(1, &barrier);
+    CD3DX12_TEXTURE_COPY_LOCATION destination(mTerrainPaintTexture.Get(), 0);
+    CD3DX12_TEXTURE_COPY_LOCATION source(mTerrainPaintUpload.Get(), mTerrainPaintFootprint);
+    cmdList->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+    barrier = CD3DX12_RESOURCE_BARRIER::Transition(mTerrainPaintTexture.Get(),
+        D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    cmdList->ResourceBarrier(1, &barrier);
+    mTerrainPaintDirty = false;
+}
+
+void RenderingSystem::BindTerrainPaint(ID3D12GraphicsCommandList* cmdList)
+{
+    CD3DX12_GPU_DESCRIPTOR_HANDLE handle(mSrvHeap->GetGPUDescriptorHandleForHeapStart());
+    handle.Offset((INT)mTerrainPaintSrvIndex, mCbvSrvUavDescriptorSize);
+    cmdList->SetGraphicsRootDescriptorTable(2, handle);
+}
+
+bool RenderingSystem::PickTerrain(const POINT& mouse, XMFLOAT2& uv) const
+{
+    if (mWidth == 0 || mHeight == 0 || mouse.x < 0 || mouse.y < 0 ||
+        mouse.x >= (LONG)mWidth || mouse.y >= (LONG)mHeight) return false;
+
+    // Convert the mouse pixel into a ray in the terrain's local coordinate system.
+    const float nx = 2.0f * (mouse.x + 0.5f) / mWidth - 1.0f;
+    const float ny = 1.0f - 2.0f * (mouse.y + 0.5f) / mHeight;
+    const XMMATRIX world = XMMatrixRotationX(mObjectPitch) * XMMatrixRotationY(mObjectYaw) *
+        XMLoadFloat4x4(&mTerrainScene.World);
+    const XMMATRIX inverse = XMMatrixInverse(nullptr, world * GetViewProjMatrix());
+    const XMVECTOR start = XMVector3TransformCoord(XMVectorSet(nx, ny, 0.0f, 1.0f), inverse);
+    const XMVECTOR end = XMVector3TransformCoord(XMVectorSet(nx, ny, 1.0f, 1.0f), inverse);
+    const XMVECTOR delta = XMVectorSubtract(end, start);
+    float closest = XMVectorGetX(XMVector3Length(delta));
+    if (!(closest > 0.0f) || !std::isfinite(closest)) return false;
+    XMFLOAT3 origin, direction;
+    XMStoreFloat3(&origin, start);
+    XMStoreFloat3(&direction, XMVector3Normalize(delta));
+
+    bool found = false;
+    const auto& mesh = mTerrainScene.CpuMesh;
+    for (int index : mTerrainSelected)
+    {
+        const auto& node = mTerrainNodes[index];
+        if (!TerrainRayBox_RS(origin, direction, node.Center, node.Extents, closest)) continue;
+        for (UINT color = 0; color < 2; ++color)
+        {
+            const UINT first = node.Parts[color].StartIndex;
+            // Skirts hide LOD cracks; they are not a paintable top surface.
+            const UINT last = first + node.TopIndexCounts[color];
+            for (UINT i = first; i < last; i += 3)
+            {
+                const auto& a = mesh.Vertices[mesh.Indices[i]];
+                const auto& b = mesh.Vertices[mesh.Indices[i + 1]];
+                const auto& c = mesh.Vertices[mesh.Indices[i + 2]];
+                float distance, u, v;
+                if (!TerrainRayTriangle_RS(origin, direction, a.Pos, b.Pos, c.Pos, distance, u, v) ||
+                    distance > closest) continue;
+                closest = distance;
+                const float w = 1.0f - u - v;
+                uv.x = std::max(0.0f, std::min(1.0f, a.TexC.x * w + b.TexC.x * u + c.TexC.x * v));
+                uv.y = std::max(0.0f, std::min(1.0f, a.TexC.y * w + b.TexC.y * u + c.TexC.y * v));
+                found = true;
+            }
+        }
+    }
+    return found;
+}
+
+void RenderingSystem::PaintTerrainStroke(const XMFLOAT2& from, const XMFLOAT2& to)
+{
+    if (mTerrainNodes.empty() || mTerrainPaintPixels.empty()) return;
+    const float radius = mTerrainBrushRadius / mTerrainNodes[0].Width;
+    const float abx = to.x - from.x, aby = to.y - from.y;
+    const float lengthSquared = abx * abx + aby * aby;
+    const float size = (float)TerrainPaintSize;
+    // Texture samples sit at texel centers, (x + 0.5) / size.
+    const int left = std::max(0, (int)floorf((std::min(from.x, to.x) - radius) * size));
+    const int right = std::min((int)TerrainPaintSize - 1, (int)ceilf((std::max(from.x, to.x) + radius) * size));
+    const int top = std::max(0, (int)floorf((std::min(from.y, to.y) - radius) * size));
+    const int bottom = std::min((int)TerrainPaintSize - 1, (int)ceilf((std::max(from.y, to.y) + radius) * size));
+    for (int y = top; y <= bottom; ++y)
+        for (int x = left; x <= right; ++x)
+        {
+            const float px = (x + 0.5f) / size, py = (y + 0.5f) / size;
+            const float t = lengthSquared > 1e-12f ?
+                std::max(0.0f, std::min(1.0f, ((px - from.x) * abx + (py - from.y) * aby) / lengthSquared)) : 0.0f;
+            const float dx = px - (from.x + t * abx), dy = py - (from.y + t * aby);
+            const float distance = sqrtf(dx * dx + dy * dy);
+            if (distance >= radius) continue;
+            // Opaque blue in the center, a narrow soft edge around the brush.
+            float coverage = std::min(1.0f, (radius - distance) / (radius * 0.2f));
+            coverage = coverage * coverage * (3.0f - 2.0f * coverage);
+            const uint8_t value = (uint8_t)(coverage * 255.0f + 0.5f);
+            auto& pixel = mTerrainPaintPixels[(size_t)y * TerrainPaintSize + x];
+            if (value > pixel)
+            {
+                pixel = value;
+                mTerrainPaintDirty = true;
+            }
+        }
+}
+
+void RenderingSystem::UpdateTerrainBrush(const InputDevice& input)
+{
+    mTerrainBrushPreview = XMFLOAT4(0, 0, 0, 0);
+    // RenderingSystem is updated on the application/window thread.
+    const HWND window = GetActiveWindow();
+    if (mMode != RenderMode::Terrain || !window || GetForegroundWindow() != window)
+    {
+        mTerrainBrushStroke = false;
+        return;
+    }
+
+    // Poll in client coordinates rather than relying on cached WM_MOUSEMOVE or
+    // mouse-button messages (capture/focus changes can leave those states stale).
+    POINT mouse{};
+    RECT client{};
+    const bool haveMouse = GetCursorPos(&mouse) && ScreenToClient(window, &mouse) &&
+        GetClientRect(window, &client) && client.right > 0 && client.bottom > 0;
+    if (haveMouse)
+    {
+        mouse.x = (LONG)floor((double)mouse.x * mWidth / client.right);
+        mouse.y = (LONG)floor((double)mouse.y * mHeight / client.bottom);
+    }
+    const bool leftDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+    const bool rightDown = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
+    XMFLOAT2 hit{};
+    bool haveHit = false;
+
+    // Visible diagnostics: READY means picking works; mask=255 means the CPU
+    // painted this point. This also identifies a successfully rebuilt executable.
+    auto showStatus = [&](const wchar_t* status)
+        {
+            int maskValue = 0;
+            if (haveHit && !mTerrainPaintPixels.empty())
+            {
+                const UINT x = std::min(TerrainPaintSize - 1, (UINT)(hit.x * TerrainPaintSize));
+                const UINT y = std::min(TerrainPaintSize - 1, (UINT)(hit.y * TerrainPaintSize));
+                maskValue = mTerrainPaintPixels[(size_t)y * TerrainPaintSize + x];
+            }
+            std::wostringstream text;
+            text << L"DX12 Terrain | Brush v2 | " << status
+                << L" | hit=" << (haveHit ? L"YES" : L"NO")
+                << L" | LMB=" << (leftDown ? L"DOWN" : L"UP")
+                << L" | mask=" << maskValue << L" | radius=" << mTerrainBrushRadius
+                << L" | mouse=" << mouse.x << L"," << mouse.y;
+            const std::wstring caption = text.str();
+            wchar_t current[512]{};
+            GetWindowTextW(window, current, _countof(current));
+            if (caption != current) SetWindowTextW(window, caption.c_str());
+        };
+
+    if (input.WasKeyPressed('C'))
+    {
+        std::fill(mTerrainPaintPixels.begin(), mTerrainPaintPixels.end(), 0);
+        mTerrainPaintDirty = true;
+        mTerrainBrushStroke = false;
+        showStatus(L"CLEARED");
+        return;
+    }
+    if (input.WasKeyPressed(VK_OEM_PLUS) || input.WasKeyPressed(VK_ADD))
+        mTerrainBrushRadius = std::min(16.0f, mTerrainBrushRadius + 0.5f);
+    if (input.WasKeyPressed(VK_OEM_MINUS) || input.WasKeyPressed(VK_SUBTRACT))
+        mTerrainBrushRadius = std::max(1.0f, mTerrainBrushRadius - 0.5f);
+    if (rightDown)
+    {
+        mTerrainBrushStroke = false;
+        showStatus(L"CAMERA (release RMB to paint)");
+        return;
+    }
+    haveHit = haveMouse && PickTerrain(mouse, hit);
+    if (!haveHit)
+    {
+        mTerrainBrushStroke = false;
+        showStatus(haveMouse ? L"NO HIT (point at terrain)" : L"NO MOUSE");
+        return;
+    }
+    mTerrainBrushPreview = XMFLOAT4(hit.x, hit.y,
+        mTerrainBrushRadius / mTerrainNodes[0].Width, 1.0f);
+    if (!leftDown)
+    {
+        mTerrainBrushStroke = false;
+        showStatus(L"READY");
+        return;
+    }
+    PaintTerrainStroke(mTerrainBrushStroke ? mTerrainLastPaintUV : hit, hit);
+    mTerrainLastPaintUV = hit;
+    mTerrainBrushStroke = true;
+    showStatus(L"PAINTING");
 }
 
 void RenderingSystem::UpdateTerrainSelection()
@@ -1162,7 +1554,8 @@ void RenderingSystem::BuildSceneTextures()
 
                 if (it == scene.CpuMesh.Materials.end() && scene.CpuMesh.Materials.size() == 1)
                 {
-                    
+                    // Robust fallback for exported OBJ files where usemtl name and .mtl newmtl name differ.
+                    // If there is only one material in the file, use it for all submeshes instead of white defaults.
                     it = scene.CpuMesh.Materials.begin();
                 }
 
@@ -1175,7 +1568,9 @@ void RenderingSystem::BuildSceneTextures()
                 std::wstring rough = tryResolveTexture(scene, mat.RoughnessMap);
                 std::wstring metal = tryResolveTexture(scene, mat.MetallicMap);
 
-                
+                // Hard fallback for the PBR homework showcase.
+                // Some Blender OBJ exports keep material names differently from the MTL file,
+                // so do not depend on MTL parsing for Cerberus: bind the known files directly.
                 if (scene.ObjPath.find(L"Cerberus.obj") != std::wstring::npos ||
                     scene.ObjPath.find(L"cerberus.obj") != std::wstring::npos)
                 {
@@ -1270,6 +1665,7 @@ void RenderingSystem::BuildDescriptorHeaps()
     mIrradianceSrvIndex = mShadowMaskSrvIndex + 1;
     mPrefilterSrvIndex = mIrradianceSrvIndex + 1;
     mBrdfLutSrvIndex = mPrefilterSrvIndex + 1;
+    mTerrainPaintSrvIndex = mBrdfLutSrvIndex + 1;
 
     D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
     srvHeapDesc.NumDescriptors = mModelTextureCount + 3 + 1 + 1 + 3 + extra;
@@ -1410,23 +1806,30 @@ void RenderingSystem::BuildConstantBuffers()
 void RenderingSystem::BuildRootSignatures()
 {
     {
-        CD3DX12_ROOT_PARAMETER rootParams[2];
+        CD3DX12_ROOT_PARAMETER rootParams[3];
         rootParams[0].InitAsConstantBufferView(0);
 
         CD3DX12_DESCRIPTOR_RANGE srvRange;
         srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 5, 0);
         rootParams[1].InitAsDescriptorTable(1, &srvRange, D3D12_SHADER_VISIBILITY_ALL);
 
-        CD3DX12_STATIC_SAMPLER_DESC staticSamp(
-            0,
-            D3D12_FILTER_MIN_MAG_MIP_LINEAR,
-            D3D12_TEXTURE_ADDRESS_MODE_WRAP,
-            D3D12_TEXTURE_ADDRESS_MODE_WRAP,
-            D3D12_TEXTURE_ADDRESS_MODE_WRAP);
+        CD3DX12_DESCRIPTOR_RANGE paintRange;
+        paintRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 5);
+        rootParams[2].InitAsDescriptorTable(1, &paintRange, D3D12_SHADER_VISIBILITY_PIXEL);
+
+        CD3DX12_STATIC_SAMPLER_DESC staticSamps[2] =
+        {
+            CD3DX12_STATIC_SAMPLER_DESC(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+                D3D12_TEXTURE_ADDRESS_MODE_WRAP, D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+                D3D12_TEXTURE_ADDRESS_MODE_WRAP),
+            CD3DX12_STATIC_SAMPLER_DESC(1, D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+                D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+                D3D12_TEXTURE_ADDRESS_MODE_CLAMP)
+        };
 
         CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(
             _countof(rootParams), rootParams,
-            1, &staticSamp,
+            _countof(staticSamps), staticSamps,
             D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
         ComPtr<ID3DBlob> serializedRootSig;
@@ -1513,7 +1916,15 @@ void RenderingSystem::BuildPSOs()
         };
 
     compile(L"Shaders/GBufferVS.hlsl", "VSMain", "vs_5_0", gVs);
-    compile(L"Shaders/GBufferPS.hlsl", "PSMain", "ps_5_0", gPs);
+    errors.Reset();
+    hr = D3DCompile(TerrainGBufferPS_RS, sizeof(TerrainGBufferPS_RS) - 1,
+        "TerrainGBufferPS (embedded in RenderingSystem.cpp)", nullptr, nullptr,
+        "PSMain", "ps_5_0", D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION, 0, &gPs, &errors);
+    if (FAILED(hr))
+    {
+        if (errors) MessageBoxA(nullptr, (char*)errors->GetBufferPointer(), "Terrain shader compile error", MB_OK);
+        ThrowIfFailed(hr);
+    }
     compile(L"Shaders/GBufferTessVS.hlsl", "VSMain", "vs_5_0", tessVs);
     compile(L"Shaders/GBufferHS.hlsl", "HSMain", "hs_5_0", gHs);
     compile(L"Shaders/GBufferDS.hlsl", "DSMain", "ds_5_0", gDs);
@@ -2067,6 +2478,8 @@ void RenderingSystem::UpdateGeometryCBWithWorld(const SceneMesh& scene, CXMMATRI
     mGeometryData.TessMaxDistance = scene.TessMaxDistance;
     mGeometryData.DisplacementScale = scene.DisplacementScale;
     mGeometryData.NormalMapFlipY = scene.NormalMapFlipY;
+    mGeometryData.TerrainPaintEnabled = (&scene == &mTerrainScene) ? 1.0f : 0.0f;
+    mGeometryData.PaintBrush = mTerrainBrushPreview;
 
     void* mapped = nullptr;
     ThrowIfFailed(mGeometryCB->Map(0, nullptr, &mapped));
@@ -2100,6 +2513,10 @@ void RenderingSystem::UpdateShadowCascades()
 {
     const float cameraNear = 0.1f;
 
+    // Sponza is much less forgiving than the simple shadow-test scene:
+    // it has long walls/columns and many casters outside the currently visible camera frustum.
+    // A slightly longer distance and a more stable square ortho projection makes the shadows
+    // stop "swimming" and disappearing when the camera moves.
     const bool isSponza = (mMode == RenderMode::Sponza);
     const float shadowDistance = isSponza ? 160.0f : 120.0f;
     const float lambda = isSponza ? 0.50f : 0.55f;
@@ -2177,7 +2594,8 @@ void RenderingSystem::UpdateShadowCascades()
             radius = std::max(radius, XMVectorGetX(XMVector3Length(v)));
         }
 
-        
+        // Make the ortho box a stable square. This is less tight than min/max fitting,
+        // but it is much more stable on Sponza and avoids clipping columns/walls at cascade edges.
         radius = ceilf(radius);
         radius += isSponza ? 4.0f : 1.5f;
 
@@ -2314,6 +2732,8 @@ void RenderingSystem::UpdateLightCB(float totalTime)
 
 void RenderingSystem::ResetCameraForMode(RenderMode mode)
 {
+    mTerrainBrushStroke = false;
+    mTerrainBrushPreview = XMFLOAT4(0, 0, 0, 0);
     mObjectYaw = 0.0f;
     mObjectPitch = 0.0f;
 
@@ -2513,6 +2933,7 @@ void RenderingSystem::Update(float totalTime, float deltaTime, const InputDevice
         UpdateTerrainSelection();
     }
 
+    UpdateTerrainBrush(input);
     UpdateLightCB(totalTime);
 
     mStatsPrintTimer += deltaTime;
@@ -2530,7 +2951,8 @@ void RenderingSystem::Update(float totalTime, float deltaTime, const InputDevice
 
         if (mMode == RenderMode::Terrain)
         {
-            oss << " | heightTiles=2x2 | LOD=" << (mTerrainLod ? "ON" : "OFF (full detail)")
+            oss << " | brush=" << mTerrainBrushRadius << " (LMB paint, +/- size, C clear)"
+                << " | heightTiles=2x2 | LOD=" << (mTerrainLod ? "ON" : "OFF (full detail)")
                 << " | culling=" << (mEnableFrustumCulling ? "ON" : "OFF")
                 << " | patches=" << mTerrainVisible << "/" << mTerrainSelected.size()
                 << " | triangles(with skirts)=" << mTerrainTriangles
@@ -2585,6 +3007,7 @@ void RenderingSystem::DrawSceneGeometryPass(
 
     ID3D12DescriptorHeap* heaps[] = { mSrvHeap.Get() };
     cmdList->SetDescriptorHeaps(1, heaps);
+    BindTerrainPaint(cmdList);
 
     CD3DX12_GPU_DESCRIPTOR_HANDLE hGpu(mSrvHeap->GetGPUDescriptorHandleForHeapStart());
     for (size_t i = 0; i < scene.DrawSubmeshes.size(); ++i)
@@ -2624,6 +3047,7 @@ void RenderingSystem::DrawOptimizationGeometryPass(
 
     ID3D12DescriptorHeap* heaps[] = { mSrvHeap.Get() };
     cmdList->SetDescriptorHeaps(1, heaps);
+    BindTerrainPaint(cmdList);
 
     std::vector<int> visibleObjects;
     mLastTotalCount = (UINT)mOptObjects.size();
@@ -2712,7 +3136,7 @@ void RenderingSystem::DrawSceneIntoShadowMap(
 
     if (mMode == RenderMode::Terrain)
     {
-        
+       
         for (int index : mTerrainSelected)
             for (UINT color = 0; color < 2; ++color)
             {
@@ -2862,6 +3286,7 @@ void RenderingSystem::Draw(
     cmdList->SetDescriptorHeaps(1, heaps);
 
 
+    UploadTerrainPaint(cmdList);
     DrawShadowPass(cmdList);
 
 
