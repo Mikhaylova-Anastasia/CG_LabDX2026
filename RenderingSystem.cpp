@@ -46,6 +46,7 @@ cbuffer GeometryCB : register(b0)
     float gTerrainPaintEnabled;
     float3 gPaintPadding;
     float4 gPaintBrush; // UV center, UV radius, preview enabled.
+    float4x4 gReprojection;
 };
 
 struct PSInput
@@ -63,6 +64,7 @@ struct PSOutput
     float4 Albedo : SV_Target0;
     float4 Normal : SV_Target1;
     float4 Position : SV_Target2;
+    float4 Reprojection : SV_Target3;
 };
 
 float3 SafeNormalize(float3 v)
@@ -113,6 +115,10 @@ PSOutput PSMain(PSInput pin)
     o.Albedo = float4(albedo, roughness);
     o.Normal = float4(normalW * 0.5f + 0.5f, metallic);
     o.Position = float4(pin.PosW, 1.0f);
+    float4 previous = mul(float4(pin.PosW, 1.0f), gReprojection);
+    float4 current = mul(float4(pin.PosW, 1.0f), gViewProj);
+    float2 previousUV = previous.xy / max(previous.w, 0.00001f) * float2(0.5f, -0.5f) + 0.5f;
+    o.Reprojection = float4(previousUV, previous.w, current.w);
     return o;
 }
 )TERRAIN_PS";
@@ -597,6 +603,7 @@ void RenderingSystem::BuildResources()
     BuildConstantBuffers();
     BuildRootSignatures();
     BuildPSOs();
+    mTAA.Initialize(mDevice, mWidth, mHeight);
 }
 
 void RenderingSystem::OnResize(UINT width, UINT height)
@@ -621,6 +628,7 @@ void RenderingSystem::OnResize(UINT width, UINT height)
     gbufSrvGpu.Offset((INT)mGBufferSrvStartIndex, mCbvSrvUavDescriptorSize);
 
     mGBuffer.CreateDescriptors(mDevice, rtvStart, gbufSrvCpu, gbufSrvGpu);
+    mTAA.Resize(width, height);
 }
 
 void RenderingSystem::BuildSceneGeometry()
@@ -1955,10 +1963,11 @@ void RenderingSystem::BuildPSOs()
         psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
         psoDesc.SampleMask = UINT_MAX;
         psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-        psoDesc.NumRenderTargets = 3;
+        psoDesc.NumRenderTargets = 4;
         psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
         psoDesc.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
         psoDesc.RTVFormats[2] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        psoDesc.RTVFormats[3] = DXGI_FORMAT_R32G32B32A32_FLOAT;
         psoDesc.DSVFormat = DXGI_FORMAT_D24_UNORM_S8_UINT;
         psoDesc.SampleDesc.Count = 1;
         ThrowIfFailed(mDevice->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&mGeometryPSO)));
@@ -1980,10 +1989,11 @@ void RenderingSystem::BuildPSOs()
         psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
         psoDesc.SampleMask = UINT_MAX;
         psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH;
-        psoDesc.NumRenderTargets = 3;
+        psoDesc.NumRenderTargets = 4;
         psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
         psoDesc.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
         psoDesc.RTVFormats[2] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        psoDesc.RTVFormats[3] = DXGI_FORMAT_R32G32B32A32_FLOAT;
         psoDesc.DSVFormat = DXGI_FORMAT_D24_UNORM_S8_UINT;
         psoDesc.SampleDesc.Count = 1;
         ThrowIfFailed(mDevice->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&mTessPSO)));
@@ -2039,7 +2049,7 @@ void RenderingSystem::BuildPSOs()
         psoDesc.SampleMask = UINT_MAX;
         psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
         psoDesc.NumRenderTargets = 1;
-        psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+        psoDesc.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
         psoDesc.DSVFormat = DXGI_FORMAT_UNKNOWN;
         psoDesc.SampleDesc.Count = 1;
         ThrowIfFailed(mDevice->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&mLightingPSO)));
@@ -2466,7 +2476,7 @@ void RenderingSystem::UpdateGeometryCB(const SceneMesh& scene)
 
 void RenderingSystem::UpdateGeometryCBWithWorld(const SceneMesh& scene, CXMMATRIX world)
 {
-    XMMATRIX viewProj = GetViewProjMatrix();
+    XMMATRIX viewProj = XMLoadFloat4x4(&mRenderViewProj);
 
     XMStoreFloat4x4(&mGeometryData.World, XMMatrixTranspose(world));
     XMStoreFloat4x4(&mGeometryData.ViewProj, XMMatrixTranspose(viewProj));
@@ -2480,6 +2490,12 @@ void RenderingSystem::UpdateGeometryCBWithWorld(const SceneMesh& scene, CXMMATRI
     mGeometryData.NormalMapFlipY = scene.NormalMapFlipY;
     mGeometryData.TerrainPaintEnabled = (&scene == &mTerrainScene) ? 1.0f : 0.0f;
     mGeometryData.PaintBrush = mTerrainBrushPreview;
+    auto previous = mPreviousWorld.find(&scene);
+    XMMATRIX previousWorld = (mTAA.Valid && previous != mPreviousWorld.end())
+        ? XMLoadFloat4x4(&previous->second) : world;
+    XMMATRIX previousVP = mTAA.Valid ? XMLoadFloat4x4(&mPreviousViewProj) : GetViewProjMatrix();
+    XMStoreFloat4x4(&mGeometryData.Reprojection, XMMatrixTranspose(
+        XMMatrixInverse(nullptr, world) * previousWorld * previousVP));
 
     void* mapped = nullptr;
     ThrowIfFailed(mGeometryCB->Map(0, nullptr, &mapped));
@@ -2489,7 +2505,7 @@ void RenderingSystem::UpdateGeometryCBWithWorld(const SceneMesh& scene, CXMMATRI
 
 void RenderingSystem::UpdateOptimizationGeometryCB(UINT objectIndex, CXMMATRIX world)
 {
-    XMMATRIX viewProj = GetViewProjMatrix();
+    XMMATRIX viewProj = XMLoadFloat4x4(&mRenderViewProj);
 
     GeometryConstants data = {};
     XMStoreFloat4x4(&data.World, XMMatrixTranspose(world));
@@ -2502,6 +2518,11 @@ void RenderingSystem::UpdateOptimizationGeometryCB(UINT objectIndex, CXMMATRIX w
     data.TessMaxDistance = mOptimizationScene.TessMaxDistance;
     data.DisplacementScale = mOptimizationScene.DisplacementScale;
     data.NormalMapFlipY = mOptimizationScene.NormalMapFlipY;
+    XMMATRIX previousWorld = (mTAA.Valid && objectIndex < mPreviousOptWorld.size())
+        ? XMLoadFloat4x4(&mPreviousOptWorld[objectIndex]) : world;
+    XMMATRIX previousVP = mTAA.Valid ? XMLoadFloat4x4(&mPreviousViewProj) : GetViewProjMatrix();
+    XMStoreFloat4x4(&data.Reprojection, XMMatrixTranspose(
+        XMMatrixInverse(nullptr, world) * previousWorld * previousVP));
 
     BYTE* mapped = nullptr;
     ThrowIfFailed(mOptimizationGeometryCB->Map(0, nullptr, reinterpret_cast<void**>(&mapped)));
@@ -2732,6 +2753,7 @@ void RenderingSystem::UpdateLightCB(float totalTime)
 
 void RenderingSystem::ResetCameraForMode(RenderMode mode)
 {
+    mTAA.Reset();
     mTerrainBrushStroke = false;
     mTerrainBrushPreview = XMFLOAT4(0, 0, 0, 0);
     mObjectYaw = 0.0f;
@@ -2914,8 +2936,30 @@ void RenderingSystem::Update(float totalTime, float deltaTime, const InputDevice
         OutputDebugStringA(mUseBeckmann ? "NDF: Beckmann\n" : "NDF: GGX\n");
     }
 
+    if (input.WasKeyPressed('T'))
+    {
+        mTAA.Enabled = !mTAA.Enabled;
+        mTAA.Reset();
+        OutputDebugStringA(mTAA.Enabled ? "TAA: ON\n" : "TAA: OFF\n");
+    }
+    if (input.WasKeyPressed('G'))
+    {
+        mTAA.SuperGhosting = !mTAA.SuperGhosting;
+        mTAA.Enabled = true;
+        mTAA.Reset();
+        OutputDebugStringA(mTAA.SuperGhosting
+            ? "TAA: SUPER GHOSTING ON | 10-frame ring | no motion compensation\n"
+            : "TAA: NORMAL ON | reprojection + depth rejection + color clamp\n");
+    }
+    if (input.WasKeyPressed('R'))
+    {
+        mTAA.Reset();
+        OutputDebugStringA("TAA: history reset\n");
+    }
+
     UpdateObjectRotation(input);
     UpdateCamera(input, deltaTime);
+    PrepareTAAFrame();
 
     mLastAnimatedCount = 0;
 
@@ -2986,14 +3030,15 @@ void RenderingSystem::DrawSceneGeometryPass(
     mGBuffer.TransitionToRenderTarget(cmdList);
     mGBuffer.Clear(cmdList);
 
-    D3D12_CPU_DESCRIPTOR_HANDLE rtvs[3] =
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvs[4] =
     {
         mGBuffer.GetAlbedoRtv(),
         mGBuffer.GetNormalRtv(),
-        mGBuffer.GetPositionRtv()
+        mGBuffer.GetPositionRtv(),
+        mTAA.MotionRtv()
     };
 
-    cmdList->OMSetRenderTargets(3, rtvs, TRUE, &depthDsv);
+    cmdList->OMSetRenderTargets(4, rtvs, FALSE, &depthDsv);
     cmdList->SetPipelineState(scene.UseTessellation ? mTessPSO.Get() : mGeometryPSO.Get());
     cmdList->SetGraphicsRootSignature(mGeometryRootSig.Get());
 
@@ -3031,14 +3076,15 @@ void RenderingSystem::DrawOptimizationGeometryPass(
     mGBuffer.TransitionToRenderTarget(cmdList);
     mGBuffer.Clear(cmdList);
 
-    D3D12_CPU_DESCRIPTOR_HANDLE rtvs[3] =
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvs[4] =
     {
         mGBuffer.GetAlbedoRtv(),
         mGBuffer.GetNormalRtv(),
-        mGBuffer.GetPositionRtv()
+        mGBuffer.GetPositionRtv(),
+        mTAA.MotionRtv()
     };
 
-    cmdList->OMSetRenderTargets(3, rtvs, TRUE, &depthDsv);
+    cmdList->OMSetRenderTargets(4, rtvs, FALSE, &depthDsv);
     cmdList->SetPipelineState(mGeometryPSO.Get());
     cmdList->SetGraphicsRootSignature(mGeometryRootSig.Get());
     cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -3136,7 +3182,7 @@ void RenderingSystem::DrawSceneIntoShadowMap(
 
     if (mMode == RenderMode::Terrain)
     {
-       
+
         for (int index : mTerrainSelected)
             for (UINT color = 0; color < 2; ++color)
             {
@@ -3288,6 +3334,7 @@ void RenderingSystem::Draw(
 
     UploadTerrainPaint(cmdList);
     DrawShadowPass(cmdList);
+    mTAA.Begin(cmdList);
 
 
     D3D12_VIEWPORT viewport = { 0.0f, 0.0f, (float)mWidth, (float)mHeight, 0.0f, 1.0f };
@@ -3324,5 +3371,30 @@ void RenderingSystem::Draw(
     }
 
 
-    DrawLightingPass(cmdList, backBufferRtv);
+    DrawLightingPass(cmdList, mTAA.ColorRtv());
+    
+    FinishTAAFrame();
+    mTAA.Resolve(cmdList, backBufferRtv);
+}
+
+void RenderingSystem::PrepareTAAFrame()
+{
+    XMMATRIX projection = mTAA.JitterProjection(GetProjMatrix(), mWidth, mHeight);
+    XMStoreFloat4x4(&mRenderViewProj, GetViewMatrix() * projection);
+}
+
+void RenderingSystem::FinishTAAFrame()
+{
+    XMStoreFloat4x4(&mPreviousViewProj, GetViewProjMatrix());
+    const SceneMesh* scenes[] = { &mSponzaScene, &mTessScene, &mOptimizationScene,
+        &mShadowTestScene, &mTerrainScene };
+    for (const SceneMesh* scene : scenes)
+    {
+        XMMATRIX world = XMMatrixRotationX(mObjectPitch) * XMMatrixRotationY(mObjectYaw)
+            * XMLoadFloat4x4(&scene->World);
+        XMStoreFloat4x4(&mPreviousWorld[scene], world);
+    }
+    mPreviousOptWorld.resize(mOptObjects.size());
+    for (size_t i = 0; i < mOptObjects.size(); ++i)
+        mPreviousOptWorld[i] = mOptObjects[i].World;
 }

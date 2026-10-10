@@ -3,6 +3,7 @@
 #include "InputDevice.h"
 #include "ObjLoader.h"
 #include "GBuffer.h"
+#include "TemporalAA.h"
 #include <unordered_map>
 #include <array>
 #include <memory>
@@ -24,12 +25,14 @@ struct GeometryConstants
     float               TerrainPaintEnabled = 0.0f;
     DirectX::XMFLOAT3   PaintPadding{};
     DirectX::XMFLOAT4   PaintBrush{}; // UV center, UV radius, preview enabled.
+    DirectX::XMFLOAT4X4 Reprojection; // inverse(current world) * previous world * previous VP
 };
 
 // Keep the CPU layout identical to GeometryCB in GBufferPS.hlsl.
 static_assert(offsetof(GeometryConstants, TerrainPaintEnabled) == 176, "GeometryCB paint flag layout mismatch");
 static_assert(offsetof(GeometryConstants, PaintBrush) == 192, "GeometryCB brush layout mismatch");
-static_assert(sizeof(GeometryConstants) == 208, "GeometryCB size mismatch");
+static_assert(offsetof(GeometryConstants, Reprojection) == 208, "GeometryCB reprojection offset");
+static_assert(sizeof(GeometryConstants) == 272, "GeometryCB size mismatch");
 
 struct DirectionalLightGPU
 {
@@ -291,6 +294,13 @@ private:
     UINT mHeight = 0;
 
     GBuffer mGBuffer;
+    TemporalAA mTAA;
+    DirectX::XMFLOAT4X4 mRenderViewProj{};
+    DirectX::XMFLOAT4X4 mPreviousViewProj{};
+    std::unordered_map<const SceneMesh*, DirectX::XMFLOAT4X4> mPreviousWorld;
+    std::vector<DirectX::XMFLOAT4X4> mPreviousOptWorld;
+    void PrepareTAAFrame();
+    void FinishTAAFrame();
 
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> mSrvHeap;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> mGBufferRtvHeap;
